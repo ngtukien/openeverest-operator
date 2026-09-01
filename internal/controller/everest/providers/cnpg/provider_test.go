@@ -13,6 +13,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	everestv1alpha1 "github.com/percona/everest-operator/api/everest/v1alpha1"
 	"github.com/percona/everest-operator/internal/controller/everest/providers"
@@ -106,6 +109,53 @@ func TestProxyRejectsPoolerConfiguration(t *testing.T) {
 	}
 	err := (&applier{Provider: provider, ctx: context.Background()}).Proxy()
 	require.ErrorContains(t, err, "does not use an Everest-managed proxy")
+}
+
+func TestBarmanObjectStoreS3(t *testing.T) {
+	t.Parallel()
+	db := &everestv1alpha1.DatabaseCluster{ObjectMeta: metav1.ObjectMeta{Name: "orders", UID: types.UID("uid-1")}}
+	storage := &everestv1alpha1.BackupStorage{Spec: everestv1alpha1.BackupStorageSpec{
+		Type: everestv1alpha1.BackupStorageTypeS3, Bucket: "backups", EndpointURL: "https://s3.example",
+		CredentialsSecretName: "backup-creds",
+	}}
+	config, err := BarmanObjectStore(storage, db)
+	require.NoError(t, err)
+	assert.Equal(t, "s3://backups/orders/uid-1", config["destinationPath"])
+	assert.Equal(t, "https://s3.example", config["endpointURL"])
+	credentials := config["s3Credentials"].(map[string]any)
+	assert.Equal(t, map[string]any{"name": "backup-creds", "key": "AWS_ACCESS_KEY_ID"}, credentials["accessKeyId"])
+}
+
+func TestBackupCreatesScheduledBackup(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	require.NoError(t, everestv1alpha1.AddToScheme(scheme))
+	scheme.AddKnownTypeWithName(ScheduledBackupGVK, &unstructured.Unstructured{})
+	listGVK := ScheduledBackupGVK
+	listGVK.Kind += "List"
+	scheme.AddKnownTypeWithName(listGVK, &unstructured.UnstructuredList{})
+	db := &everestv1alpha1.DatabaseCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "databases", UID: types.UID("uid-1")},
+		Spec: everestv1alpha1.DatabaseClusterSpec{Backup: everestv1alpha1.Backup{Schedules: []everestv1alpha1.BackupSchedule{{
+			Name: "daily", Enabled: true, Schedule: "0 2 * * *", BackupStorageName: "s3",
+		}}}},
+	}
+	storage := &everestv1alpha1.BackupStorage{
+		ObjectMeta: metav1.ObjectMeta{Name: "s3", Namespace: "databases"},
+		Spec:       everestv1alpha1.BackupStorageSpec{Type: everestv1alpha1.BackupStorageTypeS3, Bucket: "backups", CredentialsSecretName: "creds"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(db, storage).Build()
+	provider := &Provider{
+		Unstructured:    &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{}}},
+		ProviderOptions: providers.ProviderOptions{DB: db, C: c},
+	}
+	require.NoError(t, (&applier{Provider: provider, ctx: context.Background()}).Backup())
+	created := &unstructured.Unstructured{Object: map[string]any{}}
+	created.SetGroupVersionKind(ScheduledBackupGVK)
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "databases", Name: "orders-daily"}, created))
+	assert.Equal(t, "0 0 2 * * *", mustNested(t, created.Object, "spec", "schedule"))
+	assert.Equal(t, "none", mustNested(t, created.Object, "spec", "backupOwnerReference"))
+	assert.Equal(t, "s3://backups/orders/uid-1", mustNested(t, provider.Object, "spec", "backup", "barmanObjectStore", "destinationPath"))
 }
 
 func mustNested(t *testing.T, object map[string]any, fields ...string) any {

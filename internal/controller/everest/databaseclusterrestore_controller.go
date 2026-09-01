@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -73,6 +74,8 @@ type DatabaseClusterRestoreReconciler struct {
 // +kubebuilder:rbac:groups=pxc.percona.com,resources=perconaxtradbclusterrestores,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=psmdb.percona.com,resources=perconaservermongodbrestores,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=pgv2.percona.com,resources=perconapgrestores,verbs=get;list;watch;create;update;patch;delete
+// CloudNativePG recovery is represented by the Cluster bootstrap status, so no
+// additional CNPG restore resource permission is required here.
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -118,7 +121,7 @@ func (r *DatabaseClusterRestoreReconciler) Reconcile(ctx context.Context, req ct
 
 	defer func() {
 		// Update the status and finalizers of the DatabaseClusterRestore object after the reconciliation.
-		err = r.reconcileStatus(ctx, dbcr, dbc.Spec.Engine.Type)
+		err = r.reconcileStatus(ctx, dbcr, dbc)
 		if err != nil {
 			logger.Error(err, "failed to update DatabaseClusterRestore status")
 		}
@@ -142,7 +145,11 @@ func (r *DatabaseClusterRestoreReconciler) Reconcile(ctx context.Context, req ct
 		}
 	case everestv1alpha1.DatabaseEnginePostgresql:
 		if dbc.Spec.Engine.EffectiveProvider() == everestv1alpha1.DatabaseEngineProviderCloudNativePG {
-			return ctrl.Result{}, errors.New("DatabaseClusterRestore is not yet supported for the CloudNativePG provider")
+			if needRequeue, err = r.restoreCNPG(dbcr, dbc); err != nil {
+				logger.Error(err, "failed to restore CloudNativePG Cluster")
+				return ctrl.Result{}, err
+			}
+			break
 		}
 		if needRequeue, err = r.restorePG(ctx, dbcr); err != nil {
 			logger.Error(err, "failed to restore PG Cluster")
@@ -255,7 +262,7 @@ func (r *DatabaseClusterRestoreReconciler) reconcileMeta(
 func (r *DatabaseClusterRestoreReconciler) reconcileStatus(
 	ctx context.Context,
 	dbcr *everestv1alpha1.DatabaseClusterRestore,
-	engineType everestv1alpha1.EngineType,
+	db *everestv1alpha1.DatabaseCluster,
 ) error {
 	logger := log.FromContext(ctx)
 	var err error
@@ -267,7 +274,7 @@ func (r *DatabaseClusterRestoreReconciler) reconcileStatus(
 
 	dbcrStatus := everestv1alpha1.DatabaseClusterRestoreStatus{}
 	upstreamRestoreName := client.ObjectKeyFromObject(dbcr)
-	switch engineType {
+	switch db.Spec.Engine.Type {
 	case everestv1alpha1.DatabaseEnginePXC:
 		pxcCR := &pxcv1.PerconaXtraDBClusterRestore{}
 		if err = r.Get(ctx, upstreamRestoreName, pxcCR); err != nil {
@@ -297,6 +304,25 @@ func (r *DatabaseClusterRestoreReconciler) reconcileStatus(
 		dbcrStatus.CompletedAt = psmdbCR.Status.CompletedAt
 		dbcrStatus.Message = psmdbCR.Status.Error
 	case everestv1alpha1.DatabaseEnginePostgresql:
+		if db.Spec.Engine.EffectiveProvider() == everestv1alpha1.DatabaseEngineProviderCloudNativePG {
+			switch db.Status.Status.WithCreatingState() {
+			case everestv1alpha1.AppStateReady:
+				dbcrStatus.State = everestv1alpha1.RestoreSucceeded
+				// Preserve the first completion timestamp to avoid endless status churn.
+				if dbcr.Status.CompletedAt != nil {
+					dbcrStatus.CompletedAt = dbcr.Status.CompletedAt
+				} else {
+					now := metav1.Now()
+					dbcrStatus.CompletedAt = &now
+				}
+			case everestv1alpha1.AppStateError:
+				dbcrStatus.State = everestv1alpha1.RestoreFailed
+			default:
+				dbcrStatus.State = everestv1alpha1.RestoreRunning
+			}
+			dbcrStatus.Message = db.Status.Message
+			break
+		}
 		pgCR := &pgv2.PerconaPGRestore{}
 		if err = r.Get(ctx, upstreamRestoreName, pgCR); err != nil {
 			if client.IgnoreNotFound(err) != nil {
@@ -329,6 +355,22 @@ func (r *DatabaseClusterRestoreReconciler) reconcileStatus(
 		return fmt.Errorf("%s: %w", msg, err)
 	}
 	return nil
+}
+
+func (r *DatabaseClusterRestoreReconciler) restoreCNPG(
+	restore *everestv1alpha1.DatabaseClusterRestore,
+	db *everestv1alpha1.DatabaseCluster,
+) (bool, error) {
+	if db.Spec.DataSource == nil {
+		return false, errors.New("CloudNativePG supports restore only while bootstrapping a new DatabaseCluster from spec.dataSource")
+	}
+	ds := db.Spec.DataSource.IntoDBRestoreDataSource()
+	if ds.DBClusterBackupName != restore.Spec.DataSource.DBClusterBackupName ||
+		!reflect.DeepEqual(ds.BackupSource, restore.Spec.DataSource.BackupSource) ||
+		!reflect.DeepEqual(ds.PITR, restore.Spec.DataSource.PITR) {
+		return false, errors.New("CloudNativePG cannot apply an in-place restore to an existing cluster; create a new DatabaseCluster with spec.dataSource")
+	}
+	return db.Status.Status != everestv1alpha1.AppStateReady, nil
 }
 
 // restorePSMDB handles the restore process for PSMDB.

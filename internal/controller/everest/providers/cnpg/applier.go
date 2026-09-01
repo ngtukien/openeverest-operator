@@ -14,9 +14,11 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	everestv1alpha1 "github.com/percona/everest-operator/api/everest/v1alpha1"
+	"github.com/percona/everest-operator/internal/controller/everest/common"
 )
 
 type applier struct {
@@ -180,17 +182,127 @@ func (a *applier) PodSchedulingPolicy() error {
 }
 
 func (a *applier) Backup() error {
-	if len(a.DB.Spec.Backup.Schedules) != 0 || a.DB.Spec.Backup.PITR.Enabled {
-		return errors.New("backup schedules and PITR are not yet supported by the CloudNativePG provider")
+	storageNames := map[string]struct{}{}
+	for _, schedule := range a.DB.Spec.Backup.Schedules {
+		if schedule.Enabled {
+			storageNames[schedule.BackupStorageName] = struct{}{}
+		}
+		if schedule.RetentionCopies != 0 {
+			return errors.New("CloudNativePG does not support retentionCopies; use object-store lifecycle or a time-based retention policy")
+		}
+	}
+	if a.DB.Spec.Backup.PITR.Enabled {
+		if a.DB.Spec.Backup.PITR.BackupStorageName == nil {
+			return errors.New("backup.pitr.backupStorageName is required for CloudNativePG")
+		}
+		storageNames[*a.DB.Spec.Backup.PITR.BackupStorageName] = struct{}{}
+	}
+	backups := &everestv1alpha1.DatabaseClusterBackupList{}
+	if err := a.C.List(a.ctx, backups, client.InNamespace(a.DB.Namespace)); err != nil {
+		return fmt.Errorf("list DatabaseClusterBackups: %w", err)
+	}
+	for i := range backups.Items {
+		if backups.Items[i].Spec.DBClusterName == a.DB.Name && !backups.Items[i].HasCompleted() {
+			storageNames[backups.Items[i].Spec.BackupStorageName] = struct{}{}
+		}
+	}
+	if len(storageNames) > 1 {
+		return errors.New("CloudNativePG supports one object-store destination per cluster; all backups and schedules must use the same BackupStorage")
+	}
+	var storageName string
+	for name := range storageNames {
+		storageName = name
+	}
+	if storageName != "" {
+		storage, err := getBackupStorage(a.ctx, a.C, a.DB.Namespace, storageName)
+		if err != nil {
+			return err
+		}
+		config, err := BarmanObjectStore(storage, a.DB)
+		if err != nil {
+			return err
+		}
+		if err := unstructured.SetNestedMap(a.Object, map[string]any{"barmanObjectStore": config}, "spec", "backup"); err != nil {
+			return err
+		}
+	}
+	for _, schedule := range a.DB.Spec.Backup.Schedules {
+		name := a.DB.Name + "-" + schedule.Name
+		object := newUnstructured(ScheduledBackupGVK, a.DB.Namespace, name)
+		if !schedule.Enabled {
+			if err := a.C.Delete(a.ctx, object); client.IgnoreNotFound(err) != nil {
+				return err
+			}
+			continue
+		}
+		cron := strings.Fields(schedule.Schedule)
+		if len(cron) == 5 {
+			schedule.Schedule = "0 " + schedule.Schedule
+		} else if len(cron) != 6 {
+			return fmt.Errorf("CloudNativePG schedule %q must contain five or six cron fields", schedule.Name)
+		}
+		_, err := controllerutil.CreateOrUpdate(a.ctx, a.C, object, func() error {
+			object.SetLabels(map[string]string{BackupStorageLabel: schedule.BackupStorageName, ScheduleNameLabel: schedule.Name})
+			object.Object["spec"] = map[string]any{
+				"schedule": schedule.Schedule, "backupOwnerReference": "none", "method": "barmanObjectStore",
+				"cluster": a.DB.Name,
+			}
+			return controllerutil.SetControllerReference(a.DB, object, a.C.Scheme())
+		})
+		if err != nil {
+			return fmt.Errorf("reconcile CloudNativePG ScheduledBackup %q: %w", name, err)
+		}
 	}
 	return nil
 }
 
 func (a *applier) DataSource() error {
-	if a.DB.Spec.DataSource != nil {
-		return errors.New("restore bootstrap is not yet supported by the CloudNativePG provider")
+	if a.DB.Spec.DataSource == nil {
+		return nil
 	}
-	return nil
+	if a.DB.Status.Status == everestv1alpha1.AppStateReady {
+		if err := common.ReconcileDBRestoreFromDataSource(a.ctx, a.C, a.DB); err != nil {
+			return err
+		}
+		if a.DB.Spec.DataSource == nil {
+			return nil
+		}
+	}
+	storage, sourceDB, err := backupStorageForDataSource(a.ctx, a.C, a.DB)
+	if err != nil {
+		return err
+	}
+	config, err := BarmanObjectStore(storage, sourceDB)
+	if err != nil {
+		return err
+	}
+	if a.DB.Spec.DataSource.BackupSource != nil {
+		config["destinationPath"] = strings.TrimRight(a.DB.Spec.DataSource.BackupSource.Path, "/")
+	}
+	sourceName := sourceDB.Name
+	config["serverName"] = sourceName
+	recovery := map[string]any{"source": sourceName}
+	if pitr := a.DB.Spec.DataSource.PITR; pitr != nil {
+		target := map[string]any{}
+		switch pitr.Type {
+		case everestv1alpha1.PITRTypeLatest:
+			// Full recovery already replays all available WAL.
+		case everestv1alpha1.PITRTypeDate:
+			if pitr.Date == nil {
+				return errors.New("PITR date is required when type=date")
+			}
+			target["targetTime"] = pitr.Date.Time.UTC().Format(everestv1alpha1.DateFormat)
+		default:
+			return fmt.Errorf("unsupported CloudNativePG PITR type %q", pitr.Type)
+		}
+		if len(target) != 0 {
+			recovery["recoveryTarget"] = target
+		}
+	}
+	if err := unstructured.SetNestedMap(a.Object, map[string]any{"recovery": recovery}, "spec", "bootstrap"); err != nil {
+		return err
+	}
+	return unstructured.SetNestedSlice(a.Object, []any{map[string]any{"name": sourceName, "barmanObjectStore": config}}, "spec", "externalClusters")
 }
 
 func (a *applier) DataImport() error {

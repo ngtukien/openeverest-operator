@@ -96,11 +96,14 @@ Acceptance bắt buộc:
 
 ## Phase 4 — Backup, ScheduledBackup và restore
 
+Trạng thái: **đã implement lõi ở mức code, chờ E2E với CNPG/Barman object store**.
+
 - `DatabaseClusterBackup` CNPG → `Backup.postgresql.cnpg.io`.
 - Backup schedules → `ScheduledBackup.postgresql.cnpg.io`.
 - Map `BackupStorage` sang Barman object store/plugin configuration.
 - Map pending/running/completed/failed và completion time về Everest status.
-- Full restore bằng `Cluster.spec.bootstrap.recovery`; PITR làm sau full restore.
+- Full restore bằng `Cluster.spec.bootstrap.recovery`; hỗ trợ recovery target theo thời gian sau khi full restore ổn định.
+- Restore CNPG chỉ dùng khi bootstrap cluster mới; không tự động xóa/recreate cluster đang chạy để giả lập restore in-place.
 - Tách dispatch theo provider để CNPG không tạo Percona backup/restore.
 
 ## Phase 5 — Database lifecycle và scheduling
@@ -120,7 +123,7 @@ Không bao gồm CNPG `Pooler`, HAProxy hoặc read/write splitting.
 - Validate CNPG CRD/operator tồn tại khi chọn `cloudnative-pg`.
 - Validate image/version, replicas, storage và resources.
 - Với CNPG, reject proxy `type`, `replicas`, `config`, `storage`, `resources`; chỉ cho phép `proxy.expose`.
-- Reject PMM, pause, backup, restore, PITR hoặc import tới khi phase tương ứng hoàn tất.
+- Reject PMM, pause hoặc import tới khi phase tương ứng hoàn tất; validate giới hạn backup/restore riêng của CNPG.
 - Restore/backup source và target phải cùng provider.
 
 ## Phase 7 — RBAC, packaging và installation
