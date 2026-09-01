@@ -1107,7 +1107,7 @@ func (r *DatabaseClusterBackupReconciler) getCNPGBackupStatus(
 		}
 	}
 	if value, found, _ := unstructured.NestedString(upstream.Object, "status", "destinationPath"); found {
-		status.Destination = pointer.To(value)
+		status.Destination = new(value)
 	} else if value, found, _ := unstructured.NestedString(upstream.Object, "status", "backupName"); found {
 		status.Destination = pointer.To(value)
 	}
