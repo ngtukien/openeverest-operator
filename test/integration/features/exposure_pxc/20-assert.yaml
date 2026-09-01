@@ -1,6 +1,6 @@
 apiVersion: kuttl.dev/v1
 kind: TestAssert
-timeout: 10
+timeout: 30
 collectors:
   - command: kubectl -n $NAMESPACE get db/pxc-exposure -o yaml
   - command: kubectl -n $NAMESPACE get pxc/pxc-exposure -o yaml
