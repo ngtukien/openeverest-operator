@@ -354,6 +354,18 @@ spec:
           - update
           - watch
         - apiGroups:
+          - postgresql.cnpg.io
+          resources:
+          - clusters
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
           - psmdb.percona.com
           resources:
           - perconaservermongodbbackups

@@ -141,6 +141,9 @@ func (r *DatabaseClusterRestoreReconciler) Reconcile(ctx context.Context, req ct
 			return ctrl.Result{}, err
 		}
 	case everestv1alpha1.DatabaseEnginePostgresql:
+		if dbc.Spec.Engine.EffectiveProvider() == everestv1alpha1.DatabaseEngineProviderCloudNativePG {
+			return ctrl.Result{}, errors.New("DatabaseClusterRestore is not yet supported for the CloudNativePG provider")
+		}
 		if needRequeue, err = r.restorePG(ctx, dbcr); err != nil {
 			logger.Error(err, "failed to restore PG Cluster")
 			return ctrl.Result{}, err

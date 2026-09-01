@@ -129,6 +129,9 @@ func (r *DatabaseClusterBackupReconciler) Reconcile(ctx context.Context, req ctr
 	case everestv1alpha1.DatabaseEnginePSMDB:
 		requeue, err = r.reconcilePSMDB(ctx, backup)
 	case everestv1alpha1.DatabaseEnginePostgresql:
+		if cluster.Spec.Engine.EffectiveProvider() == everestv1alpha1.DatabaseEngineProviderCloudNativePG {
+			return ctrl.Result{}, errors.New("DatabaseClusterBackup is not yet supported for the CloudNativePG provider")
+		}
 		requeue, err = r.reconcilePG(ctx, backup)
 	}
 

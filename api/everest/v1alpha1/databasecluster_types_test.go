@@ -111,6 +111,17 @@ func TestDatabaseCluster_Size(t *testing.T) {
 	}
 }
 
+func TestEngineEffectiveProvider(t *testing.T) {
+	t.Parallel()
+
+	if got := (&Engine{Type: DatabaseEnginePostgresql}).EffectiveProvider(); got != DatabaseEngineProviderPerconaPostgresql {
+		t.Errorf("empty PostgreSQL provider defaulted to %q, want %q", got, DatabaseEngineProviderPerconaPostgresql)
+	}
+	if got := (&Engine{Type: DatabaseEnginePostgresql, Provider: DatabaseEngineProviderCloudNativePG}).EffectiveProvider(); got != DatabaseEngineProviderCloudNativePG {
+		t.Errorf("explicit PostgreSQL provider resolved to %q, want %q", got, DatabaseEngineProviderCloudNativePG)
+	}
+}
+
 func TestResources_ToResourceRequirements(t *testing.T) {
 	t.Parallel()
 

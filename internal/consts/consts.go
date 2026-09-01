@@ -42,6 +42,10 @@ const (
 	PSMDBDeploymentName = "percona-server-mongodb-operator"
 	// PGDeploymentName is the name of the Percona PostgreSQL operator deployment.
 	PGDeploymentName = "percona-postgresql-operator"
+	// CNPGDeploymentName is the name of the CloudNativePG operator deployment.
+	CNPGDeploymentName = "cnpg-controller-manager"
+	// CNPGOperatorNamespace is the namespace used by the cluster-wide CNPG installation.
+	CNPGOperatorNamespace = "cnpg-system"
 
 	// PXCAPIGroup is the API group for Percona XtraDB Cluster.
 	PXCAPIGroup = "pxc.percona.com"
@@ -49,6 +53,8 @@ const (
 	PSMDBAPIGroup = "psmdb.percona.com"
 	// PGAPIGroup is the API group for Percona PostgreSQL.
 	PGAPIGroup = "pgv2.percona.com"
+	// CNPGAPIGroup is the API group for CloudNativePG.
+	CNPGAPIGroup = "postgresql.cnpg.io"
 
 	// PerconaXtraDBClusterKind is the kind for Percona XtraDB Cluster.
 	PerconaXtraDBClusterKind = "PerconaXtraDBCluster"
@@ -56,6 +62,8 @@ const (
 	PerconaServerMongoDBKind = "PerconaServerMongoDB"
 	// PerconaPGClusterKind is the kind for Percona PostgreSQL.
 	PerconaPGClusterKind = "PerconaPGCluster"
+	// CNPGClusterKind is the kind for a CloudNativePG PostgreSQL cluster.
+	CNPGClusterKind = "Cluster"
 	// PerconaXtraDBClusterRestoreKind is the kind for Percona XtraDB Cluster restore.
 	PerconaXtraDBClusterRestoreKind = "PerconaXtraDBClusterRestore"
 	// LoadBalancerConfigKind is the kind for load balancer configs.

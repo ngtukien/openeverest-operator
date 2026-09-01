@@ -670,6 +670,18 @@ spec:
 
                       NOTE: Updating this property post installation may lead to a restart of the cluster.
                     type: string
+                  provider:
+                    description: |-
+                      Provider selects the PostgreSQL operator used to reconcile this cluster.
+                      Empty preserves the historical behavior and uses Percona PostgreSQL.
+                      This field is ignored for non-PostgreSQL engines.
+                    enum:
+                    - percona-postgresql
+                    - cloudnative-pg
+                    type: string
+                    x-kubernetes-validations:
+                    - message: .spec.engine.provider cannot be changed
+                      rule: self == oldSelf
                   replicas:
                     description: Replicas is the number of engine replicas
                     format: int32
@@ -881,6 +893,8 @@ spec:
                   proxy specification will be applied for the given engine. A
                   common use case for setting this field is to control the
                   external access to the database cluster.
+                  For the CloudNativePG provider, Everest does not create a proxy or expose
+                  read-replica endpoints; only Proxy.Expose configures the read-write Service.
                 properties:
                   config:
                     description: Config is the proxy configuration
@@ -1052,6 +1066,9 @@ spec:
             required:
             - engine
             type: object
+            x-kubernetes-validations:
+            - message: .spec.engine.provider is only supported for PostgreSQL
+              rule: self.engine.type == 'postgresql' || !has(self.engine.provider)
           status:
             description: DatabaseClusterStatus defines the observed state of DatabaseCluster.
             properties:
@@ -9287,6 +9304,18 @@ rules:
   - perconapgbackups
   - perconapgclusters
   - perconapgrestores
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - postgresql.cnpg.io
+  resources:
+  - clusters
   verbs:
   - create
   - delete

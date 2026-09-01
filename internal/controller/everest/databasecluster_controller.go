@@ -33,7 +33,9 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -51,6 +53,7 @@ import (
 	"github.com/percona/everest-operator/internal/consts"
 	"github.com/percona/everest-operator/internal/controller/everest/common"
 	"github.com/percona/everest-operator/internal/controller/everest/providers"
+	"github.com/percona/everest-operator/internal/controller/everest/providers/cnpg"
 	"github.com/percona/everest-operator/internal/controller/everest/providers/pg"
 	"github.com/percona/everest-operator/internal/controller/everest/providers/psmdb"
 	"github.com/percona/everest-operator/internal/controller/everest/providers/pxc"
@@ -114,6 +117,7 @@ type reconcileHooks interface {
 var (
 	_ dbProvider = (*pxc.Provider)(nil)
 	_ dbProvider = (*pg.Provider)(nil)
+	_ dbProvider = (*cnpg.Provider)(nil)
 	_ dbProvider = (*psmdb.Provider)(nil)
 )
 
@@ -131,7 +135,14 @@ func (r *DatabaseClusterReconciler) newDBProvider(
 	case everestv1alpha1.DatabaseEnginePXC:
 		return pxc.New(ctx, opts)
 	case everestv1alpha1.DatabaseEnginePostgresql:
-		return pg.New(ctx, opts)
+		switch database.Spec.Engine.EffectiveProvider() {
+		case everestv1alpha1.DatabaseEngineProviderPerconaPostgresql:
+			return pg.New(ctx, opts)
+		case everestv1alpha1.DatabaseEngineProviderCloudNativePG:
+			return cnpg.New(ctx, opts)
+		default:
+			return nil, fmt.Errorf("unsupported PostgreSQL provider %q", database.Spec.Engine.Provider)
+		}
 	case everestv1alpha1.DatabaseEnginePSMDB:
 		return psmdb.New(ctx, opts)
 	default:
@@ -343,6 +354,7 @@ func (r *DatabaseClusterReconciler) observeDataImportState(
 // +kubebuilder:rbac:groups=pxc.percona.com,resources=perconaxtradbclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=psmdb.percona.com,resources=perconaservermongodbs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=pgv2.percona.com,resources=perconapgclusters,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods;services,verbs=get;list;watch
 // +kubebuilder:rbac:groups=everest.percona.com,resources=monitoringconfigs,verbs=get;list;watch
@@ -1064,9 +1076,10 @@ func (r *DatabaseClusterReconciler) ReconcileWatchers(ctx context.Context) error
 	}
 
 	log := log.FromContext(ctx)
-	addWatcher := func(dbEngineType everestv1alpha1.EngineType, obj client.Object) error {
-		sources := []source.Source{
-			source.Kind(r.Cache, obj, &handler.EnqueueRequestForObject{}),
+	addWatcher := func(dbEngineType everestv1alpha1.EngineType, objects ...client.Object) error {
+		sources := make([]source.Source, 0, len(objects)+1)
+		for _, obj := range objects {
+			sources = append(sources, source.Kind(r.Cache, obj, &handler.EnqueueRequestForObject{}))
 		}
 
 		// special case for PXC - we need to watch pxc-restore to be sure the db is reconciled on every pxc-restore status update.
@@ -1092,7 +1105,17 @@ func (r *DatabaseClusterReconciler) ReconcileWatchers(ctx context.Context) error
 				return err
 			}
 		case everestv1alpha1.DatabaseEnginePostgresql:
-			if err := addWatcher(t, &pgv2.PerconaPGCluster{}); err != nil {
+			objects := []client.Object{&pgv2.PerconaPGCluster{}}
+			crd := &unstructured.Unstructured{Object: map[string]any{}}
+			crd.SetGroupVersionKind(schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"})
+			if err := r.Get(ctx, types.NamespacedName{Name: "clusters.postgresql.cnpg.io"}, crd); err == nil {
+				cluster := &unstructured.Unstructured{Object: map[string]any{}}
+				cluster.SetGroupVersionKind(schema.GroupVersionKind{Group: consts.CNPGAPIGroup, Version: "v1", Kind: consts.CNPGClusterKind})
+				objects = append(objects, cluster)
+			} else if !k8serrors.IsNotFound(err) {
+				return err
+			}
+			if err := addWatcher(t, objects...); err != nil {
 				return err
 			}
 		case everestv1alpha1.DatabaseEnginePSMDB:

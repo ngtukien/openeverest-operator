@@ -275,6 +275,13 @@ type Engine struct {
 	// +kubebuilder:validation:Enum:=pxc;postgresql;psmdb
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message=".spec.engine.type cannot be changed"
 	Type EngineType `json:"type"`
+	// Provider selects the PostgreSQL operator used to reconcile this cluster.
+	// Empty preserves the historical behavior and uses Percona PostgreSQL.
+	// This field is ignored for non-PostgreSQL engines.
+	// +optional
+	// +kubebuilder:validation:Enum:=percona-postgresql;cloudnative-pg
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message=".spec.engine.provider cannot be changed"
+	Provider DatabaseEngineProvider `json:"provider,omitempty"`
 	// Version is the engine version
 	Version string `json:"version,omitempty"`
 	// Replicas is the number of engine replicas
@@ -296,6 +303,24 @@ type Engine struct {
 	// NOTE: Updating this property post installation may lead to a restart of the cluster.
 	// +optional
 	CRVersion *string `json:"crVersion,omitempty"`
+}
+
+// DatabaseEngineProvider selects the operator implementation behind an engine.
+type DatabaseEngineProvider string
+
+const (
+	// DatabaseEngineProviderPerconaPostgresql preserves Everest's existing PostgreSQL implementation.
+	DatabaseEngineProviderPerconaPostgresql DatabaseEngineProvider = "percona-postgresql"
+	// DatabaseEngineProviderCloudNativePG selects the CloudNativePG implementation.
+	DatabaseEngineProviderCloudNativePG DatabaseEngineProvider = "cloudnative-pg"
+)
+
+// EffectiveProvider returns the provider with backward-compatible defaults.
+func (e *Engine) EffectiveProvider() DatabaseEngineProvider {
+	if e.Type == DatabaseEnginePostgresql && e.Provider == "" {
+		return DatabaseEngineProviderPerconaPostgresql
+	}
+	return e.Provider
 }
 
 // Size returns the size of the engine.
@@ -518,6 +543,7 @@ type EngineFeaturesStatus struct {
 }
 
 // DatabaseClusterSpec defines the desired state of DatabaseCluster.
+// +kubebuilder:validation:XValidation:rule="self.engine.type == 'postgresql' || !has(self.engine.provider)",message=".spec.engine.provider is only supported for PostgreSQL"
 type DatabaseClusterSpec struct {
 	// Paused is a flag to stop the cluster
 	Paused bool `json:"paused,omitempty"`
@@ -531,6 +557,8 @@ type DatabaseClusterSpec struct {
 	// proxy specification will be applied for the given engine. A
 	// common use case for setting this field is to control the
 	// external access to the database cluster.
+	// For the CloudNativePG provider, Everest does not create a proxy or expose
+	// read-replica endpoints; only Proxy.Expose configures the read-write Service.
 	Proxy Proxy `json:"proxy,omitempty"`
 	// DataSource defines a data source for bootstraping a new cluster
 	DataSource *DataSource `json:"dataSource,omitempty"`
