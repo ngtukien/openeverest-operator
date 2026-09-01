@@ -64,6 +64,10 @@ const (
 	PerconaPGClusterKind = "PerconaPGCluster"
 	// CNPGClusterKind is the kind for a CloudNativePG PostgreSQL cluster.
 	CNPGClusterKind = "Cluster"
+	// CNPGBackupKind is the kind for an on-demand CloudNativePG backup.
+	CNPGBackupKind = "Backup"
+	// CNPGScheduledBackupKind is the kind for a CloudNativePG backup schedule.
+	CNPGScheduledBackupKind = "ScheduledBackup"
 	// PerconaXtraDBClusterRestoreKind is the kind for Percona XtraDB Cluster restore.
 	PerconaXtraDBClusterRestoreKind = "PerconaXtraDBClusterRestore"
 	// LoadBalancerConfigKind is the kind for load balancer configs.

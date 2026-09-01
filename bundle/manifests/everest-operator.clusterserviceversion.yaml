@@ -356,7 +356,9 @@ spec:
         - apiGroups:
           - postgresql.cnpg.io
           resources:
+          - backups
           - clusters
+          - scheduledbackups
           verbs:
           - create
           - delete

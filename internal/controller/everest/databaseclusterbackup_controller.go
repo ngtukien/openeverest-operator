@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/AlekSi/pointer"
@@ -31,7 +32,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
@@ -51,6 +54,7 @@ import (
 	everestv1alpha1 "github.com/percona/everest-operator/api/everest/v1alpha1"
 	"github.com/percona/everest-operator/internal/consts"
 	"github.com/percona/everest-operator/internal/controller/everest/common"
+	cnpgprovider "github.com/percona/everest-operator/internal/controller/everest/providers/cnpg"
 )
 
 const (
@@ -74,6 +78,7 @@ type DatabaseClusterBackupReconciler struct {
 // +kubebuilder:rbac:groups=pxc.percona.com,resources=perconaxtradbclusterbackups,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=psmdb.percona.com,resources=perconaservermongodbbackups,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=pgv2.percona.com,resources=perconapgbackups,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=backups,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -130,7 +135,8 @@ func (r *DatabaseClusterBackupReconciler) Reconcile(ctx context.Context, req ctr
 		requeue, err = r.reconcilePSMDB(ctx, backup)
 	case everestv1alpha1.DatabaseEnginePostgresql:
 		if cluster.Spec.Engine.EffectiveProvider() == everestv1alpha1.DatabaseEngineProviderCloudNativePG {
-			return ctrl.Result{}, errors.New("DatabaseClusterBackup is not yet supported for the CloudNativePG provider")
+			requeue, err = r.reconcileCNPG(ctx, backup)
+			break
 		}
 		requeue, err = r.reconcilePG(ctx, backup)
 	}
@@ -175,6 +181,18 @@ func (r *DatabaseClusterBackupReconciler) ReconcileWatchers(ctx context.Context)
 			}
 		case everestv1alpha1.DatabaseEnginePostgresql:
 			if err := addWatcher(t, &pgv2.PerconaPGBackup{}, r.tryCreatePG); err != nil {
+				return err
+			}
+			crd := &unstructured.Unstructured{Object: map[string]any{}}
+			crd.SetGroupVersionKind(schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"})
+			if err := r.Get(ctx, types.NamespacedName{Name: "backups.postgresql.cnpg.io"}, crd); err == nil {
+				object := &unstructured.Unstructured{Object: map[string]any{}}
+				object.SetGroupVersionKind(cnpgprovider.BackupGVK)
+				var watchedObject client.Object = object
+				if err := r.controller.addWatchers("postgresql-cnpg-backup", source.Kind(r.Cache, watchedObject, r.watchHandler(r.tryCreateCNPG))); err != nil {
+					return err
+				}
+			} else if !k8serrors.IsNotFound(err) {
 				return err
 			}
 		case everestv1alpha1.DatabaseEnginePSMDB:
@@ -401,6 +419,9 @@ func (r *DatabaseClusterBackupReconciler) getBackupStatus(
 		backupStatus.Size = &psmdbCR.Status.Size
 		backupStatus.LatestRestorableTime = psmdbCR.Status.LatestRestorableTime
 	case everestv1alpha1.DatabaseEnginePostgresql:
+		if db.Spec.Engine.EffectiveProvider() == everestv1alpha1.DatabaseEngineProviderCloudNativePG {
+			return r.getCNPGBackupStatus(ctx, backup)
+		}
 		pgCR := &pgv2.PerconaPGBackup{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      namespacedName.Name,
@@ -731,6 +752,61 @@ func (r *DatabaseClusterBackupReconciler) tryCreatePG(ctx context.Context, obj c
 	return r.Create(ctx, backup)
 }
 
+func (r *DatabaseClusterBackupReconciler) tryCreateCNPG(ctx context.Context, obj client.Object) error {
+	upstream := &unstructured.Unstructured{Object: map[string]any{}}
+	upstream.SetGroupVersionKind(cnpgprovider.BackupGVK)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(obj), upstream); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	clusterName, _, err := unstructured.NestedString(upstream.Object, "spec", "cluster", "name")
+	if err != nil || clusterName == "" {
+		return errors.New("CloudNativePG Backup does not reference a cluster")
+	}
+	cluster := &everestv1alpha1.DatabaseCluster{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: upstream.GetNamespace(), Name: clusterName}, cluster); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if cluster.Spec.Engine.EffectiveProvider() != everestv1alpha1.DatabaseEngineProviderCloudNativePG {
+		return nil
+	}
+	storageName := upstream.GetLabels()[cnpgprovider.BackupStorageLabel]
+	if storageName == "" {
+		// Backups created by a ScheduledBackup inherit its labels in CNPG. If a
+		// particular CNPG version does not copy them, match the cluster's single
+		// enabled storage instead.
+		for _, schedule := range cluster.Spec.Backup.Schedules {
+			if schedule.Enabled {
+				if storageName != "" && storageName != schedule.BackupStorageName {
+					return errors.New("cannot determine BackupStorage for CNPG backup with multiple schedules")
+				}
+				storageName = schedule.BackupStorageName
+			}
+		}
+	}
+	if storageName == "" && cluster.Spec.Backup.PITR.BackupStorageName != nil {
+		storageName = *cluster.Spec.Backup.PITR.BackupStorageName
+	}
+	if storageName == "" {
+		return errors.New("cannot determine BackupStorage for CloudNativePG Backup")
+	}
+	backup := &everestv1alpha1.DatabaseClusterBackup{}
+	key := client.ObjectKeyFromObject(upstream)
+	if err := r.Get(ctx, key, backup); err == nil {
+		return nil
+	} else if !k8serrors.IsNotFound(err) {
+		return err
+	}
+	backup.SetName(key.Name)
+	backup.SetNamespace(key.Namespace)
+	backup.SetLabels(map[string]string{consts.DatabaseClusterNameLabel: clusterName})
+	backup.Spec.DBClusterName = clusterName
+	backup.Spec.BackupStorageName = storageName
+	if err := controllerutil.SetControllerReference(cluster, backup, r.Scheme); err != nil {
+		return err
+	}
+	return r.Create(ctx, backup)
+}
+
 func (r *DatabaseClusterBackupReconciler) tryCreatePXC(ctx context.Context, obj client.Object) error {
 	namespacedName := client.ObjectKeyFromObject(obj)
 	pxcBackup := &pxcv1.PerconaXtraDBClusterBackup{}
@@ -997,6 +1073,95 @@ func getLastPGBackupDestination(
 	pgBackup *pgv2.PerconaPGBackup,
 ) *string {
 	return ptr.To(fmt.Sprintf("s3://%s/%s/backup/db/%s", backupStorage.Spec.Bucket, common.BackupStoragePrefix(db), pgBackup.Status.BackupName))
+}
+
+func (r *DatabaseClusterBackupReconciler) getCNPGBackupStatus(
+	ctx context.Context,
+	backup *everestv1alpha1.DatabaseClusterBackup,
+) (everestv1alpha1.DatabaseClusterBackupStatus, error) {
+	status := everestv1alpha1.DatabaseClusterBackupStatus{}
+	upstream := &unstructured.Unstructured{Object: map[string]any{}}
+	upstream.SetGroupVersionKind(cnpgprovider.BackupGVK)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(backup), upstream); err != nil {
+		return status, client.IgnoreNotFound(err)
+	}
+	createdAt := upstream.GetCreationTimestamp()
+	status.CreatedAt = &createdAt
+	phase, _, _ := unstructured.NestedString(upstream.Object, "status", "phase")
+	switch strings.ToLower(phase) {
+	case "completed":
+		status.State = everestv1alpha1.BackupSucceeded
+	case "failed":
+		status.State = everestv1alpha1.BackupFailed
+	case "running", "finalizing":
+		status.State = everestv1alpha1.BackupRunning
+	case "pending", "started":
+		status.State = everestv1alpha1.BackupStarting
+	default:
+		status.State = everestv1alpha1.BackupNew
+	}
+	if value, found, _ := unstructured.NestedString(upstream.Object, "status", "stoppedAt"); found {
+		if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+			timestamp := metav1.NewTime(parsed)
+			status.CompletedAt = &timestamp
+		}
+	}
+	if value, found, _ := unstructured.NestedString(upstream.Object, "status", "destinationPath"); found {
+		status.Destination = pointer.To(value)
+	} else if value, found, _ := unstructured.NestedString(upstream.Object, "status", "backupName"); found {
+		status.Destination = pointer.To(value)
+	}
+	return status, nil
+}
+
+func (r *DatabaseClusterBackupReconciler) reconcileCNPG(
+	ctx context.Context,
+	backup *everestv1alpha1.DatabaseClusterBackup,
+) (bool, error) {
+	upstream := &unstructured.Unstructured{Object: map[string]any{}}
+	upstream.SetGroupVersionKind(cnpgprovider.BackupGVK)
+	upstream.SetName(backup.Name)
+	upstream.SetNamespace(backup.Namespace)
+	if !backup.GetDeletionTimestamp().IsZero() {
+		if controllerutil.RemoveFinalizer(backup, everestv1alpha1.DBBackupStorageProtectionFinalizer) {
+			return true, r.Update(ctx, backup)
+		}
+		if err := r.Delete(ctx, upstream); client.IgnoreNotFound(err) != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if backup.HasCompleted() {
+		return false, nil
+	}
+	cluster := &unstructured.Unstructured{Object: map[string]any{}}
+	cluster.SetGroupVersionKind(schema.GroupVersionKind{Group: consts.CNPGAPIGroup, Version: "v1", Kind: consts.CNPGClusterKind})
+	if err := r.Get(ctx, types.NamespacedName{Namespace: backup.Namespace, Name: backup.Spec.DBClusterName}, cluster); err != nil {
+		return false, err
+	}
+	if _, configured, err := unstructured.NestedMap(cluster.Object, "spec", "backup", "barmanObjectStore"); err != nil {
+		return false, err
+	} else if !configured {
+		// The DatabaseCluster reconciler adds the requested BackupStorage to the
+		// CNPG Cluster first. Creating the Backup before that would permanently
+		// fail it instead of allowing a clean retry.
+		return true, nil
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, upstream, func() error {
+		upstream.SetLabels(map[string]string{
+			consts.DatabaseClusterNameLabel: backup.Spec.DBClusterName,
+			cnpgprovider.BackupStorageLabel: backup.Spec.BackupStorageName,
+		})
+		upstream.Object["spec"] = map[string]any{
+			"method":  "barmanObjectStore",
+			"cluster": backup.Spec.DBClusterName,
+		}
+		if metav1.GetControllerOf(upstream) == nil {
+			return controllerutil.SetControllerReference(backup, upstream, r.Scheme)
+		}
+		return nil
+	})
+	return false, err
 }
 
 // Reconcile PG.
