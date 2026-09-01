@@ -1123,11 +1123,21 @@ func (r *DatabaseClusterBackupReconciler) reconcileCNPG(
 	upstream.SetName(backup.Name)
 	upstream.SetNamespace(backup.Namespace)
 	if !backup.GetDeletionTimestamp().IsZero() {
-		if controllerutil.RemoveFinalizer(backup, everestv1alpha1.DBBackupStorageProtectionFinalizer) {
-			return true, r.Update(ctx, backup)
-		}
+		// Delete the upstream CNPG Backup before removing our finalizer, otherwise the
+		// DatabaseClusterBackup may disappear and leave the upstream resource orphaned.
 		if err := r.Delete(ctx, upstream); client.IgnoreNotFound(err) != nil {
 			return false, err
+		}
+		// Wait until the upstream object is actually gone.
+		getErr := r.Get(ctx, client.ObjectKeyFromObject(upstream), upstream)
+		if getErr == nil {
+			return true, nil
+		}
+		if client.IgnoreNotFound(getErr) != nil {
+			return false, getErr
+		}
+		if controllerutil.RemoveFinalizer(backup, everestv1alpha1.DBBackupStorageProtectionFinalizer) {
+			return true, r.Update(ctx, backup)
 		}
 		return false, nil
 	}
