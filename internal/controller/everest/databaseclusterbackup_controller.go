@@ -1072,7 +1072,7 @@ func getLastPGBackupDestination(
 	db *everestv1alpha1.DatabaseCluster,
 	pgBackup *pgv2.PerconaPGBackup,
 ) *string {
-	return ptr.To(fmt.Sprintf("s3://%s/%s/backup/db/%s", backupStorage.Spec.Bucket, common.BackupStoragePrefix(db), pgBackup.Status.BackupName))
+	return new(fmt.Sprintf("s3://%s/%s/backup/db/%s", backupStorage.Spec.Bucket, common.BackupStoragePrefix(db), pgBackup.Status.BackupName))
 }
 
 func (r *DatabaseClusterBackupReconciler) getCNPGBackupStatus(
