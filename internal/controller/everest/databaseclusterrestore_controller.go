@@ -308,8 +308,13 @@ func (r *DatabaseClusterRestoreReconciler) reconcileStatus(
 			switch db.Status.Status.WithCreatingState() {
 			case everestv1alpha1.AppStateReady:
 				dbcrStatus.State = everestv1alpha1.RestoreSucceeded
-				now := metav1.Now()
-				dbcrStatus.CompletedAt = &now
+				// Preserve the first completion timestamp to avoid endless status churn.
+				if dbcr.Status.CompletedAt != nil {
+					dbcrStatus.CompletedAt = dbcr.Status.CompletedAt
+				} else {
+					now := metav1.Now()
+					dbcrStatus.CompletedAt = &now
+				}
 			case everestv1alpha1.AppStateError:
 				dbcrStatus.State = everestv1alpha1.RestoreFailed
 			default:
