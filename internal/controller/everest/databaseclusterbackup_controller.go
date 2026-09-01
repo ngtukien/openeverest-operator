@@ -1101,7 +1101,7 @@ func (r *DatabaseClusterBackupReconciler) getCNPGBackupStatus(
 		status.State = everestv1alpha1.BackupNew
 	}
 	if value, found, _ := unstructured.NestedString(upstream.Object, "status", "stoppedAt"); found {
-		if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
 			timestamp := metav1.NewTime(parsed)
 			status.CompletedAt = &timestamp
 		}
