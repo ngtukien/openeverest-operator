@@ -1164,7 +1164,7 @@ func (r *DatabaseClusterBackupReconciler) reconcileCNPG(
 		})
 		upstream.Object["spec"] = map[string]any{
 			"method":  "barmanObjectStore",
-			"cluster": backup.Spec.DBClusterName,
+			"cluster": map[string]any{"name": backup.Spec.DBClusterName},
 		}
 		if metav1.GetControllerOf(upstream) == nil {
 			return controllerutil.SetControllerReference(backup, upstream, r.Scheme)
