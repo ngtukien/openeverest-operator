@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TOOLS_PATH: "/opt/tools/bin"
-      IMAGE_PREFIX: 'ghcr.io/openeverest'
+      IMAGE_PREFIX: 'ghcr.io/${{ github.repository_owner }}'
       EVEREST_OPERATOR_DEV_IMAGE_NAME: 'openeverest-operator-dev'
       EVEREST_OPERATOR_BUNDLE_DEV_IMAGE_NAME: 'openeverest-operator-bundle-dev'
 
