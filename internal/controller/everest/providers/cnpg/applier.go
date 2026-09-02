@@ -245,7 +245,7 @@ func (a *applier) Backup() error {
 			object.SetLabels(map[string]string{BackupStorageLabel: schedule.BackupStorageName, ScheduleNameLabel: schedule.Name})
 			object.Object["spec"] = map[string]any{
 				"schedule": schedule.Schedule, "backupOwnerReference": "none", "method": "barmanObjectStore",
-				"cluster": a.DB.Name,
+				"cluster": map[string]any{"name": a.DB.Name},
 			}
 			return controllerutil.SetControllerReference(a.DB, object, a.C.Scheme())
 		})

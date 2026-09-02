@@ -155,6 +155,7 @@ func TestBackupCreatesScheduledBackup(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "databases", Name: "orders-daily"}, created))
 	assert.Equal(t, "0 0 2 * * *", mustNested(t, created.Object, "spec", "schedule"))
 	assert.Equal(t, "none", mustNested(t, created.Object, "spec", "backupOwnerReference"))
+	assert.Equal(t, "orders", mustNested(t, created.Object, "spec", "cluster", "name"))
 	assert.Equal(t, "s3://backups/orders/uid-1", mustNested(t, provider.Object, "spec", "backup", "barmanObjectStore", "destinationPath"))
 }
 
