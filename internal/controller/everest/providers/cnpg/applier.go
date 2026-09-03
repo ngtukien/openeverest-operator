@@ -31,7 +31,9 @@ func (a *applier) ResetDefaults() error {
 	if a.Object == nil {
 		a.Object = map[string]any{}
 	}
-	a.Object["spec"] = map[string]any{}
+	if _, ok := a.Object["spec"]; !ok {
+		a.Object["spec"] = map[string]any{}
+	}
 	return nil
 }
 

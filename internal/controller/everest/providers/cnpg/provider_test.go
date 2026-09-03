@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -157,6 +158,30 @@ func TestBackupCreatesScheduledBackup(t *testing.T) {
 	assert.Equal(t, "none", mustNested(t, created.Object, "spec", "backupOwnerReference"))
 	assert.Equal(t, "orders", mustNested(t, created.Object, "spec", "cluster", "name"))
 	assert.Equal(t, "s3://backups/orders/uid-1", mustNested(t, provider.Object, "spec", "backup", "barmanObjectStore", "destinationPath"))
+}
+
+func TestStatusResizingVolumes(t *testing.T) {
+	t.Parallel()
+	// A PVC in the Resizing condition represents the online expansion window;
+	// the provider should expose that transient state through Everest status.
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	db := &everestv1alpha1.DatabaseCluster{ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "databases"}}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders-1", Namespace: "databases", Labels: map[string]string{"cnpg.io/cluster": "orders"}},
+		Status: corev1.PersistentVolumeClaimStatus{Conditions: []corev1.PersistentVolumeClaimCondition{{
+			Type: corev1.PersistentVolumeClaimResizing, Status: corev1.ConditionTrue,
+		}}},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
+	provider := &Provider{
+		Unstructured:    &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"instances": int64(1)}}},
+		ProviderOptions: providers.ProviderOptions{DB: db, C: c},
+	}
+	status, complete, err := provider.Status(context.Background())
+	require.NoError(t, err)
+	assert.True(t, complete)
+	assert.Equal(t, everestv1alpha1.AppState("resizingVolumes"), status.Status)
 }
 
 func mustNested(t *testing.T, object map[string]any, fields ...string) any {
