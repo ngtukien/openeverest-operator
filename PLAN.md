@@ -182,6 +182,54 @@ Acceptance Phase 10:
 5. Fail primary target trong lúc replicate và xác nhận subscription recovery.
 6. Cutover sang cùng một RW endpoint, không bổ sung read routing.
 
+## Phase 11 — CNPG Replica Cluster (Cross-Zone / Cross-Cluster HA & DR qua pg_basebackup)
+
+Mục tiêu là hỗ trợ dựng cụm bản sao (Replica Cluster) ở một Zone khác hoặc Kubernetes Cluster khác bằng Physical Streaming Replication để bảo vệ dữ liệu ở cấp độ trung tâm dữ liệu (Datacenter/Zone Failure).
+
+Kiến trúc và cơ chế kỹ thuật:
+
+- **Cụm Primary (Zone A):** Nhận đọc/ghi, cấu hình tài khoản sao lưu (`streaming_replica`) và mở Service kết nối.
+- **Cụm Replica (Zone B):**
+  - Khởi tạo ban đầu (bootstrap) bằng **`pg_basebackup`** trực tiếp từ endpoint của Cụm Primary qua mạng, hoặc bootstrap từ S3 Barman Object Store.
+  - Toàn bộ các Pods ở cụm Replica đóng vai trò là Standby instances, liên tục nhận và replay WAL vật lý từ Primary.
+  - Cấu hình native CNPG được Everest sinh ra:
+    ```yaml
+    spec:
+      instances: 3
+      replica:
+        enabled: true
+        source: primary-cluster
+      bootstrap:
+        pg_basebackup:
+          source: primary-cluster
+      externalClusters:
+        - name: primary-cluster
+          connectionParameters:
+            host: <primary-cluster-rw-endpoint>
+            user: streaming_replica
+            sslmode: require
+          password:
+            name: streaming-replica-secret
+            key: password
+    ```
+- **Kịch bản Failover / Thăng cấp (Disaster Recovery):**
+  - Khi Zone A sập: thực hiện cô lập (fencing) cụm A.
+  - Đổi `spec.replica.enabled: false` tại cụm B → CNPG tự động kích hoạt tiến trình promotion, biến instance khỏe nhất ở cụm B thành Primary mới nhận ghi.
+
+Tích hợp vào OpenEverest Operator:
+
+- Bổ sung cấu hình `spec.replica` hoặc `spec.dataSource.replicaCluster` trong CRD `DatabaseCluster`.
+- Provider Adapter `applier.go` nhận diện cấu hình replica để render đúng `spec.replica`, `spec.bootstrap.pg_basebackup` và `spec.externalClusters`.
+- Quản lý Secret chứng thực sao lưu vật lý giữa 2 Zone.
+- Bổ sung chỉ số đo lường độ trễ đồng bộ (Replication Lag byte offset qua `pg_wal_lsn_diff`) vào `DatabaseCluster.status`.
+
+Acceptance Phase 11:
+
+1. Everest khởi tạo thành công cụm Replica Cluster ở Zone B trỏ tới cụm Primary ở Zone A.
+2. Cụm B bootstrap thành công snapshot ban đầu qua `pg_basebackup` mà không làm gián đoạn luồng ghi ở cụm A.
+3. Dữ liệu ghi mới ở cụm A được đồng bộ tức thì sang cụm B qua Physical Streaming Replication.
+4. Kích hoạt chuyển vùng (DR Promotion): Cụm B trở thành Primary độc lập thành công sau khi ngắt kết nối với cụm A.
+
 ## Definition of Done tổng thể
 
 - Percona PostgreSQL cũ không đổi hành vi khi provider rỗng.

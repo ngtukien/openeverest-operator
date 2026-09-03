@@ -111,6 +111,9 @@ func TestDatabaseCluster_Size(t *testing.T) {
 	}
 }
 
+// [CUSTOM CNPG] TestEngineEffectiveProvider: Kiểm thử logic lấy provider thực tế:
+// - Để trống -> mặc định là Percona (tương thích ngược).
+// - Khai báo "cloudnative-pg" -> nhận đúng CloudNativePG.
 func TestEngineEffectiveProvider(t *testing.T) {
 	t.Parallel()
 

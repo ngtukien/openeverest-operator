@@ -61,9 +61,11 @@ var (
 	ScheduledBackupGVK = schema.GroupVersionKind{Group: consts.CNPGAPIGroup, Version: "v1", Kind: consts.CNPGScheduledBackupKind}
 )
 
-// BarmanObjectStore builds the in-tree CNPG object-store configuration from an
-// Everest BackupStorage. CNPG 1.30 still accepts this API, although it is
-// deprecated upstream in favour of the separately installed Barman plugin.
+// [CUSTOM CNPG] BarmanObjectStore: Chuyển đổi cấu hình Everest BackupStorage thành spec
+// "barmanObjectStore" chuẩn của CloudNativePG:
+// - destinationPath: đường dẫn s3://<bucket>/<prefix> hoặc Azure URL
+// - s3Credentials / azureCredentials: ánh xạ các key từ Secret (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+// - endpointURL: hỗ trợ S3-compatible như MinIO, SeaweedFS, Ceph RGW.
 func BarmanObjectStore(storage *everestv1alpha1.BackupStorage, db *everestv1alpha1.DatabaseCluster) (map[string]any, error) {
 	if storage.Spec.ForcePathStyle != nil && *storage.Spec.ForcePathStyle {
 		return nil, errors.New("CloudNativePG in-tree backups do not support forcePathStyle")
@@ -118,6 +120,9 @@ func getBackupStorage(ctx context.Context, c client.Client, namespace, name stri
 	return storage, nil
 }
 
+// [CUSTOM CNPG] backupStorageForDataSource: Phục vụ khôi phục (Restore / PITR):
+// Tìm ra đối tượng BackupStorage và DatabaseCluster nguồn (sourceDB) tương ứng từ khai báo spec.dataSource
+// để cấu hình quá trình tải dữ liệu sao lưu về cho cụm mới.
 func backupStorageForDataSource(ctx context.Context, c client.Client, db *everestv1alpha1.DatabaseCluster) (*everestv1alpha1.BackupStorage, *everestv1alpha1.DatabaseCluster, error) {
 	ds := pointer.Get(db.Spec.DataSource)
 	if ds.DBClusterBackupName != "" {

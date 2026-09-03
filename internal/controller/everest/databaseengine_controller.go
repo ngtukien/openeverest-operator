@@ -111,6 +111,14 @@ func (r *DatabaseEngineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
+	// Some providers, such as CloudNativePG, are installed independently and
+	// do not have an Everest DatabaseEngine in the Installed state. Reconcile
+	// their dynamic watchers before the Percona operator readiness checks and
+	// their early returns below.
+	if err := r.reconcileWatchers(ctx); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile watchers: %w", err)
+	}
+
 	pendingUpgrades, err := r.listPendingOperatorUpgrades(ctx, dbEngine)
 	if err != nil {
 		return ctrl.Result{}, err

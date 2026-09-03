@@ -144,6 +144,7 @@ func (r *DatabaseClusterRestoreReconciler) Reconcile(ctx context.Context, req ct
 			return ctrl.Result{}, err
 		}
 	case everestv1alpha1.DatabaseEnginePostgresql:
+		// [CUSTOM CNPG] Phân nhánh xử lý khôi phục dữ liệu cho provider CloudNativePG
 		if dbc.Spec.Engine.EffectiveProvider() == everestv1alpha1.DatabaseEngineProviderCloudNativePG {
 			if needRequeue, err = r.restoreCNPG(dbcr, dbc); err != nil {
 				logger.Error(err, "failed to restore CloudNativePG Cluster")
@@ -305,6 +306,10 @@ func (r *DatabaseClusterRestoreReconciler) reconcileStatus(
 		dbcrStatus.Message = psmdbCR.Status.Error
 	case everestv1alpha1.DatabaseEnginePostgresql:
 		if db.Spec.Engine.EffectiveProvider() == everestv1alpha1.DatabaseEngineProviderCloudNativePG {
+			// [CUSTOM CNPG] Với CloudNativePG, quá trình phục hồi gắn liền với tiến trình khởi tạo cụm mới:
+			// - Khi DatabaseCluster đạt trạng thái Ready -> RestoreSucceeded
+			// - Giữ nguyên mốc CompletedAt ban đầu (idempotent), không gọi metav1.Now() lặp lại
+			//   để tránh tạo vòng lặp reconcile vô tận (infinite reconcile loop).
 			switch db.Status.Status.WithCreatingState() {
 			case everestv1alpha1.AppStateReady:
 				dbcrStatus.State = everestv1alpha1.RestoreSucceeded
@@ -357,6 +362,10 @@ func (r *DatabaseClusterRestoreReconciler) reconcileStatus(
 	return nil
 }
 
+// [CUSTOM CNPG] restoreCNPG: Quản lý tính hợp lệ khi khôi phục CloudNativePG:
+// - CNPG không hỗ trợ restore in-place đè lên cụm đang chạy (do spec.bootstrap là immutable).
+// - Khôi phục CNPG luôn được thực hiện bằng cách tạo một cụm DatabaseCluster mới với spec.dataSource.
+// - Hàm này xác thực nguồn dataSource và kiểm tra trạng thái cụm cho đến khi đạt AppStateReady.
 func (r *DatabaseClusterRestoreReconciler) restoreCNPG(
 	restore *everestv1alpha1.DatabaseClusterRestore,
 	db *everestv1alpha1.DatabaseCluster,

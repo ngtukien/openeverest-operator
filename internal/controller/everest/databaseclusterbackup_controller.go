@@ -156,6 +156,26 @@ func (r *DatabaseClusterBackupReconciler) Reconcile(ctx context.Context, req ctr
 
 // ReconcileWatchers reconciles the watchers for the DatabaseClusterBackup controller.
 func (r *DatabaseClusterBackupReconciler) ReconcileWatchers(ctx context.Context) error {
+	// [CUSTOM CNPG] Đăng ký dynamic watcher cho tài nguyên Backup của CloudNativePG:
+	// Do CNPG là provider độc lập và không có tài nguyên DatabaseEngine của Everest,
+	// ta chủ động kiểm tra xem CRD "backups.postgresql.cnpg.io" đã được cài đặt chưa.
+	// Nếu có, đăng ký watcher theo dõi đối tượng Backup để tự động cập nhật DatabaseClusterBackup.
+	crd := &unstructured.Unstructured{Object: map[string]any{}}
+	crd.SetGroupVersionKind(schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"})
+	if err := r.Get(ctx, types.NamespacedName{Name: "backups.postgresql.cnpg.io"}, crd); err == nil {
+		object := &unstructured.Unstructured{Object: map[string]any{}}
+		object.SetGroupVersionKind(cnpgprovider.BackupGVK)
+		var watchedObject client.Object = object
+		if err := r.controller.addWatchers(
+			"postgresql-cnpg-backup",
+			source.Kind(r.Cache, watchedObject, r.watchHandler(r.tryCreateCNPG)),
+		); err != nil {
+			return err
+		}
+	} else if !k8serrors.IsNotFound(err) {
+		return err
+	}
+
 	dbEngines := &everestv1alpha1.DatabaseEngineList{}
 	if err := r.List(ctx, dbEngines); err != nil {
 		return err
@@ -181,18 +201,6 @@ func (r *DatabaseClusterBackupReconciler) ReconcileWatchers(ctx context.Context)
 			}
 		case everestv1alpha1.DatabaseEnginePostgresql:
 			if err := addWatcher(t, &pgv2.PerconaPGBackup{}, r.tryCreatePG); err != nil {
-				return err
-			}
-			crd := &unstructured.Unstructured{Object: map[string]any{}}
-			crd.SetGroupVersionKind(schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"})
-			if err := r.Get(ctx, types.NamespacedName{Name: "backups.postgresql.cnpg.io"}, crd); err == nil {
-				object := &unstructured.Unstructured{Object: map[string]any{}}
-				object.SetGroupVersionKind(cnpgprovider.BackupGVK)
-				var watchedObject client.Object = object
-				if err := r.controller.addWatchers("postgresql-cnpg-backup", source.Kind(r.Cache, watchedObject, r.watchHandler(r.tryCreateCNPG))); err != nil {
-					return err
-				}
-			} else if !k8serrors.IsNotFound(err) {
 				return err
 			}
 		case everestv1alpha1.DatabaseEnginePSMDB:
@@ -419,6 +427,8 @@ func (r *DatabaseClusterBackupReconciler) getBackupStatus(
 		backupStatus.Size = &psmdbCR.Status.Size
 		backupStatus.LatestRestorableTime = psmdbCR.Status.LatestRestorableTime
 	case everestv1alpha1.DatabaseEnginePostgresql:
+		// [CUSTOM CNPG] Nếu provider là CloudNativePG, gọi hàm getCNPGBackupStatus riêng
+		// để đọc status từ CRD Backup của CNPG thay vì PerconaPGBackup.
 		if db.Spec.Engine.EffectiveProvider() == everestv1alpha1.DatabaseEngineProviderCloudNativePG {
 			return r.getCNPGBackupStatus(ctx, backup)
 		}
@@ -1171,7 +1181,10 @@ func (r *DatabaseClusterBackupReconciler) reconcileCNPG(
 		}
 		return nil
 	})
-	return false, err
+	// Keep polling until the upstream Backup reaches a terminal phase. The
+	// dynamic watcher normally makes this immediate, while the requeue keeps
+	// status convergence reliable if a watch event is missed.
+	return true, err
 }
 
 // Reconcile PG.

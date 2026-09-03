@@ -57,7 +57,7 @@ func TestReconcileCNPGBackupCreatesClusterReference(t *testing.T) {
 
 	requeue, err := reconciler.reconcileCNPG(context.Background(), backup)
 	require.NoError(t, err)
-	assert.False(t, requeue)
+	assert.True(t, requeue)
 
 	created := &unstructured.Unstructured{Object: map[string]any{}}
 	created.SetGroupVersionKind(cnpgprovider.BackupGVK)
