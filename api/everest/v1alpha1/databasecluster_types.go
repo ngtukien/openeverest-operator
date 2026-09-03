@@ -275,9 +275,10 @@ type Engine struct {
 	// +kubebuilder:validation:Enum:=pxc;postgresql;psmdb
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message=".spec.engine.type cannot be changed"
 	Type EngineType `json:"type"`
-	// Provider selects the PostgreSQL operator used to reconcile this cluster.
-	// Empty preserves the historical behavior and uses Percona PostgreSQL.
-	// This field is ignored for non-PostgreSQL engines.
+	// [CUSTOM CNPG] Provider chọn operator bên dưới để reconcile PostgreSQL cluster.
+	// Hỗ trợ "percona-postgresql" (mặc định) và "cloudnative-pg".
+	// Giá trị này là bất biến (immutable) sau khi khởi tạo, tránh đổi runtime giữa chừng.
+	// Trường này bị bỏ qua đối với các engine không phải PostgreSQL (pxc, psmdb).
 	// +optional
 	// +kubebuilder:validation:Enum:=percona-postgresql;cloudnative-pg
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message=".spec.engine.provider cannot be changed"
@@ -302,20 +303,22 @@ type Engine struct {
 	//
 	// NOTE: Updating this property post installation may lead to a restart of the cluster.
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message=".spec.engine.crVersion cannot be changed"
 	CRVersion *string `json:"crVersion,omitempty"`
 }
 
-// DatabaseEngineProvider selects the operator implementation behind an engine.
+// [CUSTOM CNPG] DatabaseEngineProvider định danh nhà cung cấp operator thực thi bên dưới engine.
 type DatabaseEngineProvider string
 
 const (
-	// DatabaseEngineProviderPerconaPostgresql preserves Everest's existing PostgreSQL implementation.
+	// [CUSTOM CNPG] DatabaseEngineProviderPerconaPostgresql: giữ nguyên hành vi mặc định dùng Percona PG Operator.
 	DatabaseEngineProviderPerconaPostgresql DatabaseEngineProvider = "percona-postgresql"
-	// DatabaseEngineProviderCloudNativePG selects the CloudNativePG implementation.
+	// [CUSTOM CNPG] DatabaseEngineProviderCloudNativePG: điều hướng reconcile sang CloudNativePG Operator.
 	DatabaseEngineProviderCloudNativePG DatabaseEngineProvider = "cloudnative-pg"
 )
 
-// EffectiveProvider returns the provider with backward-compatible defaults.
+// [CUSTOM CNPG] EffectiveProvider trả về provider thực tế, tự động gán mặc định về Percona
+// nếu người dùng không khai báo để đảm bảo tương thích ngược 100% với các cụm cũ.
 func (e *Engine) EffectiveProvider() DatabaseEngineProvider {
 	if e.Type == DatabaseEnginePostgresql && e.Provider == "" {
 		return DatabaseEngineProviderPerconaPostgresql
@@ -543,6 +546,7 @@ type EngineFeaturesStatus struct {
 }
 
 // DatabaseClusterSpec defines the desired state of DatabaseCluster.
+// [CUSTOM CNPG] Ràng buộc validation: chỉ engine type "postgresql" mới được phép có trường "provider".
 // +kubebuilder:validation:XValidation:rule="self.engine.type == 'postgresql' || !has(self.engine.provider)",message=".spec.engine.provider is only supported for PostgreSQL"
 type DatabaseClusterSpec struct {
 	// Paused is a flag to stop the cluster
@@ -557,8 +561,8 @@ type DatabaseClusterSpec struct {
 	// proxy specification will be applied for the given engine. A
 	// common use case for setting this field is to control the
 	// external access to the database cluster.
-	// For the CloudNativePG provider, Everest does not create a proxy or expose
-	// read-replica endpoints; only Proxy.Expose configures the read-write Service.
+	// [CUSTOM CNPG] Với provider CloudNativePG, Everest không sinh proxy trung gian (như PgBouncer)
+	// mà chỉ tái sử dụng Proxy.Expose để cấu hình Service RW (LoadBalancer/ClusterIP) trỏ thẳng vào Primary.
 	Proxy Proxy `json:"proxy,omitempty"`
 	// DataSource defines a data source for bootstraping a new cluster
 	DataSource *DataSource `json:"dataSource,omitempty"`

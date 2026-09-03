@@ -52,6 +52,13 @@ func (a *applier) Metadata() error {
 	return controllerutil.SetControllerReference(a.DB, a.Unstructured, a.C.Scheme())
 }
 
+// [CUSTOM CNPG] Engine: Chuyển đổi toàn bộ cấu hình engine từ Everest sang CNPG Cluster spec:
+// - instances: số lượng node PostgreSQL (engine.Replicas)
+// - imageName: image của PostgreSQL (ghcr.io/cloudnative-pg/postgresql:<version>)
+// - storage: dung lượng và StorageClass
+// - resources: requests và limits CPU/RAM
+// - bootstrap.initdb: secret chứa thông tin mật khẩu ban đầu
+// - postgresql.parameters: các tham số cấu hình custom trong engine.Config
 func (a *applier) Engine() error {
 	if a.pausedErr != nil {
 		return a.pausedErr
@@ -110,6 +117,11 @@ func (a *applier) EngineFeatures() error {
 	return nil
 }
 
+// [CUSTOM CNPG] Proxy: Xử lý Service Exposure cho CNPG:
+// - CNPG không dùng proxy ngoài do Everest quản lý; nó có sẵn Service native.
+// - Nếu người dùng cấu hình proxy.expose dạng LoadBalancer/NodePort, Everest sẽ khai báo
+//   vào "spec.managed.services.additional" để CNPG tự sinh Service "<cluster>-rw-external"
+//   trỏ trực tiếp vào Primary pod hiện tại.
 func (a *applier) Proxy() error {
 	proxy := a.DB.Spec.Proxy
 	proxyResources := proxy.Resources.ToResourceRequirements()
@@ -181,6 +193,11 @@ func (a *applier) PodSchedulingPolicy() error {
 	return unstructured.SetNestedMap(a.Object, affinity, "spec", "affinity")
 }
 
+// [CUSTOM CNPG] Backup: Đồng bộ cấu hình sao lưu cho CNPG Cluster:
+// 1. Tìm BackupStorage được chỉ định và ánh xạ vào "spec.backup.barmanObjectStore" của CNPG.
+// 2. Kiểm tra ràng buộc: CNPG chỉ hỗ trợ 1 đích lưu trữ S3 duy nhất cho toàn cụm.
+// 3. Với mỗi lịch trong spec.backup.schedules: tự động sinh ra hoặc xóa tài nguyên
+//    ScheduledBackup ("postgresql.cnpg.io/v1") tương ứng trên K8s.
 func (a *applier) Backup() error {
 	storageNames := map[string]struct{}{}
 	for _, schedule := range a.DB.Spec.Backup.Schedules {
@@ -256,6 +273,10 @@ func (a *applier) Backup() error {
 	return nil
 }
 
+// [CUSTOM CNPG] DataSource: Cấu hình phục hồi (Restore / PITR) khi khởi tạo cụm CNPG mới:
+// - Lấy thông tin BackupStorage và thông tin cụm nguồn (sourceDB).
+// - Cấu hình "spec.bootstrap.recovery" (chỉ định source và mốc thời gian recoveryTarget nếu dùng PITR).
+// - Cấu hình "spec.externalClusters" kết nối tới Barman S3 Object Store để tải dữ liệu về.
 func (a *applier) DataSource() error {
 	if a.DB.Spec.DataSource == nil {
 		return nil
