@@ -275,7 +275,7 @@ func validateVersionChange(currentImage, desiredVersion string) error {
 	if lastColon <= lastSlash {
 		return fmt.Errorf("cannot determine PostgreSQL version from current CloudNativePG image %q", currentImage)
 	}
-	currentVersion := strings.SplitN(currentImage[lastColon+1:], "@", 2)[0]
+	currentVersion, _, _ := strings.Cut(currentImage[lastColon+1:], "@")
 	current, err := semver.NewVersion(currentVersion)
 	if err != nil {
 		return fmt.Errorf("cannot determine PostgreSQL version from current CloudNativePG image %q: %w", currentImage, err)
