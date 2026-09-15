@@ -41,7 +41,7 @@ const (
 	replicationSecretSuffix = "-replication"
 	caSecretSuffix          = "-ca"
 	certAuthSSLMode         = "verify-full"
-	passwordAuthSSLMode     = "prefer"
+	preferSSLMode           = "prefer"
 )
 
 // [CUSTOM CNPG] ReplicaCluster: dựng cụm này thành bản sao (standby cluster) của một cụm
@@ -131,13 +131,13 @@ func configureReplicaAuth(source *everestv1alpha1.ReplicaSource, entry, connecti
 	sslMode := source.SSLMode
 	if source.PasswordSecretName != "" {
 		if sslMode == "" {
-			sslMode = passwordAuthSSLMode
+			sslMode = preferSSLMode
 		}
-		passwordKey := source.PasswordSecretKey
-		if passwordKey == "" {
-			passwordKey = corev1.BasicAuthPasswordKey
+		secretKey := source.PasswordSecretKey
+		if secretKey == "" {
+			secretKey = corev1.BasicAuthPasswordKey
 		}
-		entry["password"] = map[string]any{"name": source.PasswordSecretName, "key": passwordKey}
+		entry["password"] = map[string]any{"name": source.PasswordSecretName, "key": secretKey}
 	} else {
 		if sslMode == "" {
 			sslMode = certAuthSSLMode

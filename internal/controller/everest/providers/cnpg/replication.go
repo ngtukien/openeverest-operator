@@ -129,9 +129,9 @@ func (a *applier) reconcileSubscription(sub everestv1alpha1.ReplicationSubscript
 	if sslMode == "" {
 		sslMode = "prefer"
 	}
-	passwordKey := source.PasswordSecretKey
-	if passwordKey == "" {
-		passwordKey = corev1.BasicAuthPasswordKey
+	secretKey := source.PasswordSecretKey
+	if secretKey == "" {
+		secretKey = corev1.BasicAuthPasswordKey
 	}
 	externalClusterName := sub.Name + "-source"
 	externalCluster := map[string]any{
@@ -143,7 +143,7 @@ func (a *applier) reconcileSubscription(sub everestv1alpha1.ReplicationSubscript
 			"dbname":  source.DBName,
 			"sslmode": sslMode,
 		},
-		"password": map[string]any{"name": source.PasswordSecretName, "key": passwordKey},
+		"password": map[string]any{"name": source.PasswordSecretName, "key": secretKey},
 	}
 	if err := mergeExternalCluster(a.Object, externalCluster); err != nil {
 		return err
