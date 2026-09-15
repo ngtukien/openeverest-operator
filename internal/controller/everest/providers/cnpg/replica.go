@@ -71,10 +71,7 @@ func (a *applier) ReplicaCluster() error {
 		return errors.New("replica.source.clusterName is required")
 	}
 
-	entry, externalClusterName, err := buildReplicaExternalCluster(&source, a.DB.Namespace)
-	if err != nil {
-		return err
-	}
+	entry, externalClusterName := buildReplicaExternalCluster(&source, a.DB.Namespace)
 	if err := mergeExternalCluster(a.Object, entry); err != nil {
 		return fmt.Errorf("merge replica externalCluster %q: %w", externalClusterName, err)
 	}
@@ -89,7 +86,7 @@ func (a *applier) ReplicaCluster() error {
 	}, "spec", "replica")
 }
 
-func buildReplicaExternalCluster(source *everestv1alpha1.ReplicaSource, defaultNamespace string) (map[string]any, string, error) {
+func buildReplicaExternalCluster(source *everestv1alpha1.ReplicaSource, defaultNamespace string) (map[string]any, string) {
 	namespace := source.Namespace
 	if namespace == "" {
 		namespace = defaultNamespace
@@ -124,36 +121,46 @@ func buildReplicaExternalCluster(source *everestv1alpha1.ReplicaSource, defaultN
 	}
 
 	configureReplicaAuth(source, entry, connectionParameters)
-	return entry, externalClusterName, nil
+	return entry, externalClusterName
 }
 
 func configureReplicaAuth(source *everestv1alpha1.ReplicaSource, entry, connectionParameters map[string]any) {
-	sslMode := source.SSLMode
 	if source.PasswordSecretName != "" {
-		if sslMode == "" {
-			sslMode = preferSSLMode
-		}
-		secretKey := source.PasswordSecretKey
-		if secretKey == "" {
-			secretKey = corev1.BasicAuthPasswordKey
-		}
-		entry["password"] = map[string]any{"name": source.PasswordSecretName, "key": secretKey}
-	} else {
-		if sslMode == "" {
-			sslMode = certAuthSSLMode
-		}
-		clientCertSecret := source.ClientCertSecretName
-		if clientCertSecret == "" {
-			clientCertSecret = source.ClusterName + replicationSecretSuffix
-		}
-		caSecret := source.CASecretName
-		if caSecret == "" {
-			caSecret = source.ClusterName + caSecretSuffix
-		}
-		entry["sslKey"] = map[string]any{"name": clientCertSecret, "key": "tls.key"}
-		entry["sslCert"] = map[string]any{"name": clientCertSecret, "key": "tls.crt"}
-		entry["sslRootCert"] = map[string]any{"name": caSecret, "key": "ca.crt"}
+		configureReplicaPasswordAuth(source, entry, connectionParameters)
+		return
 	}
+	configureReplicaCertAuth(source, entry, connectionParameters)
+}
+
+func configureReplicaPasswordAuth(source *everestv1alpha1.ReplicaSource, entry, connectionParameters map[string]any) {
+	sslMode := source.SSLMode
+	if sslMode == "" {
+		sslMode = preferSSLMode
+	}
+	secretKey := source.PasswordSecretKey
+	if secretKey == "" {
+		secretKey = corev1.BasicAuthPasswordKey
+	}
+	entry["password"] = map[string]any{"name": source.PasswordSecretName, "key": secretKey}
+	connectionParameters["sslmode"] = sslMode
+}
+
+func configureReplicaCertAuth(source *everestv1alpha1.ReplicaSource, entry, connectionParameters map[string]any) {
+	sslMode := source.SSLMode
+	if sslMode == "" {
+		sslMode = certAuthSSLMode
+	}
+	clientCertSecret := source.ClientCertSecretName
+	if clientCertSecret == "" {
+		clientCertSecret = source.ClusterName + replicationSecretSuffix
+	}
+	caSecret := source.CASecretName
+	if caSecret == "" {
+		caSecret = source.ClusterName + caSecretSuffix
+	}
+	entry["sslKey"] = map[string]any{"name": clientCertSecret, "key": "tls.key"}
+	entry["sslCert"] = map[string]any{"name": clientCertSecret, "key": "tls.crt"}
+	entry["sslRootCert"] = map[string]any{"name": caSecret, "key": "ca.crt"}
 	connectionParameters["sslmode"] = sslMode
 }
 

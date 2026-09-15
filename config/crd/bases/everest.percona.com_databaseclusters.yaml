@@ -639,6 +639,83 @@ spec:
                     - pgbouncer
                     type: string
                 type: object
+              replica:
+                description: |-
+                  [CUSTOM CNPG] Replica turns this cluster into a CloudNativePG replica cluster: bootstrapped
+                  from an external primary via pg_basebackup, then kept in sync by physical streaming
+                  replication. CloudNativePG-only; xem PLAN.md Phase 11.
+                properties:
+                  enabled:
+                    default: true
+                    description: |-
+                      Enabled keeps this cluster in read-only standby mode, continuously replaying WAL from
+                      Source. Setting it to false promotes the cluster to a writable primary — the DR drill —
+                      and is a one-way transition: a promoted cluster cannot be demoted back by setting it to
+                      true again, it has to be re-bootstrapped.
+                    type: boolean
+                  source:
+                    description: Source is the primary cluster to bootstrap and stream
+                      from.
+                    properties:
+                      caSecretName:
+                        description: |-
+                          CASecretName is a Secret holding ca.crt of the source cluster's CA. Defaults to
+                          "<clusterName>-ca". Ignored when PasswordSecretName is set.
+                        type: string
+                      clientCertSecretName:
+                        description: |-
+                          ClientCertSecretName is a Secret holding tls.crt/tls.key of the replication client
+                          certificate. Defaults to "<clusterName>-replication", the Secret CloudNativePG generates
+                          on the source cluster. Ignored when PasswordSecretName is set.
+                        type: string
+                      clusterName:
+                        description: |-
+                          ClusterName is the name of the source (primary) CloudNativePG cluster. Everest derives the
+                          streaming endpoint and the CloudNativePG-generated TLS Secret names from it.
+                        type: string
+                      dbName:
+                        description: DBName to connect to on the source. Defaults
+                          to "postgres".
+                        type: string
+                      host:
+                        description: |-
+                          Host overrides the derived "<clusterName>-rw.<namespace>.svc" endpoint. Set it when the
+                          primary lives in another Kubernetes cluster and is reached through an external address.
+                        type: string
+                      namespace:
+                        description: Namespace holding the source cluster. Defaults
+                          to this cluster's namespace.
+                        type: string
+                      passwordSecretKey:
+                        description: PasswordSecretKey is the key inside PasswordSecretName.
+                          Defaults to "password".
+                        type: string
+                      passwordSecretName:
+                        description: |-
+                          PasswordSecretName selects password authentication instead of certificate
+                          authentication, using the named Secret in this cluster's namespace.
+                        type: string
+                      port:
+                        description: Port on the source. Defaults to 5432.
+                        format: int32
+                        type: integer
+                      sslMode:
+                        description: |-
+                          SSLMode is the libpq sslmode. Defaults to "verify-full" for certificate authentication
+                          and "prefer" for password authentication.
+                        type: string
+                      user:
+                        description: |-
+                          User is the replication-capable role to connect as. Defaults to "streaming_replica",
+                          the role CloudNativePG creates on every cluster.
+                        type: string
+                    required:
+                    - clusterName
+                    type: object
+                required:
+                - enabled
+                - source
+                type: object
               replication:
                 description: |-
                   [CUSTOM CNPG] Replication configures PostgreSQL logical replication (Publication/Subscription)
@@ -919,6 +996,30 @@ spec:
                   - The database engine version (.spec.engine.version) cannot be modified
                   This field is unset when the CR is already running at the latest recommended version.
                 type: string
+              replica:
+                description: |-
+                  [CUSTOM CNPG] Replica reports the observed replica-cluster (cross-zone DR) state.
+                  Set only when .spec.replica is configured; xem PLAN.md Phase 11.
+                properties:
+                  designatedPrimary:
+                    description: |-
+                      DesignatedPrimary is the Pod acting as the writable leader of the replica cluster: the
+                      instance that streams from SourceHost and cascades to the other replicas.
+                    type: string
+                  enabled:
+                    description: Enabled is true while this cluster is a read-only
+                      standby, false once it has been promoted.
+                    type: boolean
+                  sourceCluster:
+                    description: SourceCluster is the name of the .spec.externalClusters
+                      entry being streamed from.
+                    type: string
+                  sourceHost:
+                    description: SourceHost is the endpoint the WAL is streamed from.
+                    type: string
+                required:
+                - enabled
+                type: object
               size:
                 description: Size is the total number of pods
                 format: int32

@@ -73,7 +73,7 @@ func (a *applier) Metadata() error {
 // - storage: dung lượng và StorageClass
 // - resources: requests và limits CPU/RAM
 // - bootstrap.initdb: secret chứa thông tin mật khẩu ban đầu
-// - postgresql.parameters: các tham số cấu hình custom trong engine.Config
+// - postgresql.parameters: các tham số cấu hình custom trong engine.Config.
 func (a *applier) Engine() error {
 	if a.pausedErr != nil {
 		return a.pausedErr
@@ -118,10 +118,15 @@ func (a *applier) Engine() error {
 		"resources": resources,
 	}
 	if engine.Storage.Class != nil {
-		spec["storage"].(map[string]any)["storageClass"] = *engine.Storage.Class
+		if storage, ok := spec["storage"].(map[string]any); ok {
+			storage["storageClass"] = *engine.Storage.Class
+		}
 	}
 	setStorageSize := func(size resource.Quantity, storageClass *string) {
-		storage := spec["storage"].(map[string]any)
+		storage, ok := spec["storage"].(map[string]any)
+		if !ok {
+			return
+		}
 		storage["size"] = size.String()
 		if storageClass != nil {
 			storage["storageClass"] = *storageClass
@@ -154,35 +159,6 @@ func (a *applier) Engine() error {
 		return err
 	}
 	a.Object["spec"] = spec
-	return nil
-}
-
-func (a *applier) currentStorageSize() (resource.Quantity, error) {
-	size, found, err := unstructured.NestedString(a.Object, "spec", "storage", "size")
-	if err != nil {
-		return resource.Quantity{}, fmt.Errorf("read current CloudNativePG storage size: %w", err)
-	}
-	if !found || size == "" {
-		return resource.Quantity{}, nil
-	}
-	currentSize, err := resource.ParseQuantity(size)
-	if err != nil {
-		return resource.Quantity{}, fmt.Errorf("parse current CloudNativePG storage size %q: %w", size, err)
-	}
-	return currentSize, nil
-}
-
-func (a *applier) configureMonitoring(spec map[string]any) error {
-	// [CUSTOM CNPG] Phase 8 (Observability): chỉ bật enablePodMonitor khi CRD PodMonitor của
-	// Prometheus Operator đã cài trên cụm; nếu không, CNPG Cluster vẫn expose metrics ở cổng
-	// "metrics" (9187) nhưng không tự sinh PodMonitor. Xem PLAN.md Phase 8.
-	podMonitorInstalled, err := podMonitorCRDInstalled(a.ctx, a.C)
-	if err != nil {
-		return fmt.Errorf("check PodMonitor CRD: %w", err)
-	}
-	if podMonitorInstalled {
-		spec["monitoring"] = map[string]any{"enablePodMonitor": true}
-	}
 	return nil
 }
 
@@ -458,6 +434,35 @@ func (a *applier) DataSource() error {
 
 func (a *applier) DataImport() error {
 	return errors.New("data import is not yet supported by the CloudNativePG provider")
+}
+
+func (a *applier) currentStorageSize() (resource.Quantity, error) {
+	size, found, err := unstructured.NestedString(a.Object, "spec", "storage", "size")
+	if err != nil {
+		return resource.Quantity{}, fmt.Errorf("read current CloudNativePG storage size: %w", err)
+	}
+	if !found || size == "" {
+		return resource.Quantity{}, nil
+	}
+	currentSize, err := resource.ParseQuantity(size)
+	if err != nil {
+		return resource.Quantity{}, fmt.Errorf("parse current CloudNativePG storage size %q: %w", size, err)
+	}
+	return currentSize, nil
+}
+
+func (a *applier) configureMonitoring(spec map[string]any) error {
+	// [CUSTOM CNPG] Phase 8 (Observability): chỉ bật enablePodMonitor khi CRD PodMonitor của
+	// Prometheus Operator đã cài trên cụm; nếu không, CNPG Cluster vẫn expose metrics ở cổng
+	// "metrics" (9187) nhưng không tự sinh PodMonitor. Xem PLAN.md Phase 8.
+	podMonitorInstalled, err := podMonitorCRDInstalled(a.ctx, a.C)
+	if err != nil {
+		return fmt.Errorf("check PodMonitor CRD: %w", err)
+	}
+	if podMonitorInstalled {
+		spec["monitoring"] = map[string]any{"enablePodMonitor": true}
+	}
+	return nil
 }
 
 func parsePostgreSQLParameters(config string) map[string]any {

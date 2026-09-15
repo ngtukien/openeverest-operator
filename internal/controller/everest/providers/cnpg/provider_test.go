@@ -332,7 +332,9 @@ func TestApplierPodSchedulingPolicyUsesCNPGSchema(t *testing.T) {
 	}
 
 	require.NoError(t, (&applier{Provider: provider, ctx: context.Background()}).PodSchedulingPolicy())
-	affinity := mustNested(t, provider.Object, "spec", "affinity").(map[string]any)
+	rawAffinity := mustNested(t, provider.Object, "spec", "affinity")
+	affinity, ok := rawAffinity.(map[string]any)
+	require.True(t, ok)
 	assert.Contains(t, affinity, "nodeAffinity")
 	assert.Contains(t, affinity, "additionalPodAntiAffinity")
 	assert.NotContains(t, affinity, "podAntiAffinity")

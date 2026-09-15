@@ -310,18 +310,18 @@ type Engine struct {
 	CRVersion *string `json:"crVersion,omitempty"`
 }
 
-// [CUSTOM CNPG] DatabaseEngineProvider định danh nhà cung cấp operator thực thi bên dưới engine.
+// DatabaseEngineProvider identifies the underlying operator implementation for an engine.
 type DatabaseEngineProvider string
 
 const (
-	// [CUSTOM CNPG] DatabaseEngineProviderPerconaPostgresql: giữ nguyên hành vi mặc định dùng Percona PG Operator.
+	// DatabaseEngineProviderPerconaPostgresql retains default behavior using Percona PG Operator.
 	DatabaseEngineProviderPerconaPostgresql DatabaseEngineProvider = "percona-postgresql"
-	// [CUSTOM CNPG] DatabaseEngineProviderCloudNativePG: điều hướng reconcile sang CloudNativePG Operator.
+	// DatabaseEngineProviderCloudNativePG directs reconcile to CloudNativePG Operator.
 	DatabaseEngineProviderCloudNativePG DatabaseEngineProvider = "cloudnative-pg"
 )
 
-// [CUSTOM CNPG] EffectiveProvider trả về provider thực tế, tự động gán mặc định về Percona
-// nếu người dùng không khai báo để đảm bảo tương thích ngược 100% với các cụm cũ.
+// EffectiveProvider returns the effective provider, defaulting to Percona
+// if unset to ensure 100% backward compatibility.
 func (e *Engine) EffectiveProvider() DatabaseEngineProvider {
 	if e.Type == DatabaseEnginePostgresql && e.Provider == "" {
 		return DatabaseEngineProviderPerconaPostgresql
@@ -588,10 +588,10 @@ type DatabaseClusterSpec struct {
 	Replica *ReplicaCluster `json:"replica,omitempty"`
 }
 
-// [CUSTOM CNPG] ReplicaCluster khai báo cụm này là bản sao (standby cluster) của một cụm
-// PostgreSQL primary khác — thường nằm ở Zone hoặc Kubernetes cluster khác, phục vụ Disaster
-// Recovery. Everest ánh xạ sang "spec.replica", "spec.bootstrap.pg_basebackup" và một entry
-// "spec.externalClusters" trên CNPG Cluster.
+// ReplicaCluster configures this cluster as a standby replica cluster of another
+// PostgreSQL primary cluster — typically across zones or Kubernetes clusters for Disaster
+// Recovery. Everest maps this to "spec.replica", "spec.bootstrap.pg_basebackup" and an
+// entry in "spec.externalClusters" on the CNPG Cluster.
 type ReplicaCluster struct {
 	// Enabled keeps this cluster in read-only standby mode, continuously replaying WAL from
 	// Source. Setting it to false promotes the cluster to a writable primary — the DR drill —
@@ -649,9 +649,9 @@ type ReplicaSource struct {
 	PasswordSecretKey string `json:"passwordSecretKey,omitempty"`
 }
 
-// [CUSTOM CNPG] Replication khai báo các Publication/Subscription logical replication cần đồng bộ
-// trên cụm này. Everest ánh xạ trực tiếp sang CRD "Publication"/"Subscription"
-// (postgresql.cnpg.io/v1) của CloudNativePG.
+// Replication configures PostgreSQL logical replication (Publication/Subscription)
+// to be reconciled on this cluster. Everest maps this to CloudNativePG CRDs
+// "Publication" and "Subscription" (postgresql.cnpg.io/v1).
 type Replication struct {
 	// Publications to create on this cluster.
 	Publications []ReplicationPublication `json:"publications,omitempty"`

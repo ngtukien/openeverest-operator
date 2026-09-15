@@ -5,6 +5,7 @@ metadata:
     alm-examples: '[]'
     capabilities: Basic Install
   name: everest-operator.v1.16.2
+  name: everest-operator.v0.0.0
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -107,3 +108,4 @@ spec:
     name: Percona
     url: https://percona.com
   version: 1.16.2
+  version: 0.0.0
