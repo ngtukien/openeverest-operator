@@ -219,10 +219,11 @@ func TestDatabaseClusterValidator_ValidateCreate(t *testing.T) { //nolint:mainti
 				db.Spec.Engine.UserSecretsName = dbcTestUserSecretName
 			},
 			wantError: apierrors.NewInvalid(dbClusterGroupKind, dbcTestDbName, field.ErrorList{
-				errInvalidField(dbcUserSecretsNamePath, dbcTestUserSecretName, apierrors.NewNotFound(apiSchema.GroupResource{
-					Group:    corev1.SchemeGroupVersion.Group,
-					Resource: "secrets",
-				},
+				errInvalidField(dbcUserSecretsNamePath, dbcTestUserSecretName, apierrors.NewNotFound(
+					apiSchema.GroupResource{
+						Group:    corev1.SchemeGroupVersion.Group,
+						Resource: "secrets",
+					},
 					dbcTestUserSecretName,
 				).Error()),
 			}),
@@ -248,10 +249,11 @@ func TestDatabaseClusterValidator_ValidateCreate(t *testing.T) { //nolint:mainti
 				}
 			},
 			wantError: apierrors.NewInvalid(dbClusterGroupKind, dbcTestDbName, field.ErrorList{
-				errInvalidField(dbcDataImportPath, "importer", apierrors.NewNotFound(apiSchema.GroupResource{
-					Group:    everestv1alpha1.GroupVersion.Group,
-					Resource: "dataimporters",
-				},
+				errInvalidField(dbcDataImportPath, "importer", apierrors.NewNotFound(
+					apiSchema.GroupResource{
+						Group:    everestv1alpha1.GroupVersion.Group,
+						Resource: "dataimporters",
+					},
 					"importer",
 				).Error()),
 			}),
@@ -317,10 +319,11 @@ func TestDatabaseClusterValidator_ValidateCreate(t *testing.T) { //nolint:mainti
 				db.Spec.Engine.Type = everestv1alpha1.DatabaseEnginePSMDB
 			},
 			wantError: apierrors.NewInvalid(dbClusterGroupKind, dbcTestDbName, field.ErrorList{
-				errInvalidField(dbcProxyExposeLbcPath, "lbc-test", apierrors.NewNotFound(apiSchema.GroupResource{
-					Group:    everestv1alpha1.GroupVersion.Group,
-					Resource: "loadbalancerconfigs",
-				},
+				errInvalidField(dbcProxyExposeLbcPath, "lbc-test", apierrors.NewNotFound(
+					apiSchema.GroupResource{
+						Group:    everestv1alpha1.GroupVersion.Group,
+						Resource: "loadbalancerconfigs",
+					},
 					"lbc-test",
 				).Error()),
 			}),
@@ -388,10 +391,11 @@ func TestDatabaseClusterValidator_ValidateCreate(t *testing.T) { //nolint:mainti
 				db.Spec.Engine.Type = everestv1alpha1.DatabaseEnginePSMDB
 			},
 			wantError: apierrors.NewInvalid(dbClusterGroupKind, dbcTestDbName, field.ErrorList{
-				errInvalidField(dbcPsmdbShdcEngineFeaturePath, "shdc-test", apierrors.NewNotFound(apiSchema.GroupResource{
-					Group:    enginefeatureseverestv1alpha1.GroupVersion.Group,
-					Resource: "splithorizondnsconfigs",
-				},
+				errInvalidField(dbcPsmdbShdcEngineFeaturePath, "shdc-test", apierrors.NewNotFound(
+					apiSchema.GroupResource{
+						Group:    enginefeatureseverestv1alpha1.GroupVersion.Group,
+						Resource: "splithorizondnsconfigs",
+					},
 					"shdc-test",
 				).Error()),
 			}),
@@ -846,18 +850,22 @@ func TestDatabaseClusterValidator_CNPGUpdateGuards(t *testing.T) {
 	}
 
 	t.Run("minor upgrade is allowed", func(t *testing.T) {
+		t.Parallel()
 		_, err := validator.ValidateUpdate(t.Context(), newDB("16.3"), newDB("16.4"))
 		require.NoError(t, err)
 	})
 	t.Run("major update is rejected", func(t *testing.T) {
+		t.Parallel()
 		_, err := validator.ValidateUpdate(t.Context(), newDB("16.4"), newDB("17.1"))
 		require.ErrorContains(t, err, "only minor version changes")
 	})
 	t.Run("downgrade is rejected", func(t *testing.T) {
+		t.Parallel()
 		_, err := validator.ValidateUpdate(t.Context(), newDB("16.4"), newDB("16.3"))
 		require.ErrorContains(t, err, "downgrade is not supported")
 	})
 	t.Run("provider is immutable", func(t *testing.T) {
+		t.Parallel()
 		oldDB := newDB("16.4")
 		newDB := oldDB.DeepCopy()
 		newDB.Spec.Engine.Provider = everestv1alpha1.DatabaseEngineProviderPerconaPostgresql
@@ -886,6 +894,7 @@ func TestDatabaseClusterValidator_ReplicationIsCNPGOnly(t *testing.T) {
 	}
 
 	t.Run("rejected for the default (Percona PostgreSQL) provider", func(t *testing.T) {
+		t.Parallel()
 		db := &everestv1alpha1.DatabaseCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: dbcTestDbName, Namespace: dbcTestDbNamespace},
 			Spec: everestv1alpha1.DatabaseClusterSpec{
@@ -898,6 +907,7 @@ func TestDatabaseClusterValidator_ReplicationIsCNPGOnly(t *testing.T) {
 	})
 
 	t.Run("rejected on update for the default (Percona PostgreSQL) provider", func(t *testing.T) {
+		t.Parallel()
 		oldDB := &everestv1alpha1.DatabaseCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: dbcTestDbName, Namespace: dbcTestDbNamespace},
 			Spec: everestv1alpha1.DatabaseClusterSpec{

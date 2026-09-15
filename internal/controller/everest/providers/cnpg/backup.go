@@ -1,36 +1,17 @@
 // everest-operator
-// // everest-operator
-// // Copyright (C) 2022 Percona LLC
-// //
-// // Licensed under the Apache License, Version 2.0 (the "License");
-// // you may not use this file except in compliance with the License.
-// // You may obtain a copy of the License at
-// //
-// // http://www.apache.org/licenses/LICENSE-2.0
-// //
-// // Unless required by applicable law or agreed to in writing, software
-// // distributed under the License is distributed on an "AS IS" BASIS,
-// // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// // See the License for the specific language governing permissions and
-// // limitations under the License.
-
-// // everest-operator
-// // Copyright (C) 2022 Percona LLC
-// //
-// // Licensed under the Apache License, Version 2.0 (the "License");
-// // you may not use this file except in compliance with the License.
-// // You may obtain a copy of the License at
-// //
-// // http://www.apache.org/licenses/LICENSE-2.0
-// //
-// // Unless required by applicable law or agreed to in writing, software
-// // distributed under the License is distributed on an "AS IS" BASIS,
-// // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// // See the License for the specific language governing permissions and
-// // limitations under the License.
-
 // Copyright (C) 2022 Percona LLC
-// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package cnpg
 
@@ -52,16 +33,20 @@ import (
 )
 
 const (
+	// BackupStorageLabel is the label used to associate backups with BackupStorage.
 	BackupStorageLabel = "everest.percona.com/backup-storage"
-	ScheduleNameLabel  = "everest.percona.com/backup-schedule"
+	// ScheduleNameLabel is the label used to associate backups with a schedule.
+	ScheduleNameLabel = "everest.percona.com/backup-schedule"
 )
 
 var (
-	BackupGVK          = schema.GroupVersionKind{Group: consts.CNPGAPIGroup, Version: "v1", Kind: consts.CNPGBackupKind}
+	// BackupGVK is the GroupVersionKind for CloudNativePG Backup CRD.
+	BackupGVK = schema.GroupVersionKind{Group: consts.CNPGAPIGroup, Version: "v1", Kind: consts.CNPGBackupKind}
+	// ScheduledBackupGVK is the GroupVersionKind for CloudNativePG ScheduledBackup CRD.
 	ScheduledBackupGVK = schema.GroupVersionKind{Group: consts.CNPGAPIGroup, Version: "v1", Kind: consts.CNPGScheduledBackupKind}
 )
 
-// [CUSTOM CNPG] BarmanObjectStore: Chuyển đổi cấu hình Everest BackupStorage thành spec
+// BarmanObjectStore [CUSTOM CNPG] chuyển đổi cấu hình Everest BackupStorage thành spec
 // "barmanObjectStore" chuẩn của CloudNativePG:
 // - destinationPath: đường dẫn s3://<bucket>/<prefix> hoặc Azure URL
 // - s3Credentials / azureCredentials: ánh xạ các key từ Secret (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)

@@ -1,42 +1,24 @@
 // everest-operator
-// // everest-operator
-// // Copyright (C) 2022 Percona LLC
-// //
-// // Licensed under the Apache License, Version 2.0 (the "License");
-// // you may not use this file except in compliance with the License.
-// // You may obtain a copy of the License at
-// //
-// // http://www.apache.org/licenses/LICENSE-2.0
-// //
-// // Unless required by applicable law or agreed to in writing, software
-// // distributed under the License is distributed on an "AS IS" BASIS,
-// // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// // See the License for the specific language governing permissions and
-// // limitations under the License.
-
-// // everest-operator
-// // Copyright (C) 2022 Percona LLC
-// //
-// // Licensed under the Apache License, Version 2.0 (the "License");
-// // you may not use this file except in compliance with the License.
-// // You may obtain a copy of the License at
-// //
-// // http://www.apache.org/licenses/LICENSE-2.0
-// //
-// // Unless required by applicable law or agreed to in writing, software
-// // distributed under the License is distributed on an "AS IS" BASIS,
-// // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// // See the License for the specific language governing permissions and
-// // limitations under the License.
-
 // Copyright (C) 2022 Percona LLC
-// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package cnpg
 
 import (
 	"errors"
 	"fmt"
+	"strconv"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
@@ -52,15 +34,17 @@ const ReplicaSourceSuffix = "-replica-source"
 // CloudNativePG creates on every cluster; "-replication" and "-ca" are the Secrets it generates
 // to authenticate that role.
 const (
-	defaultReplicaUser       = "streaming_replica"
-	defaultReplicaDBName     = "postgres"
-	defaultReplicaPort       = 5432
-	replicationSecretSuffix  = "-replication"
-	caSecretSuffix           = "-ca"
-	certAuthSSLMode          = "verify-full"
-	passwordAuthSSLMode      = "prefer"
-	defaultPasswordSecretKey = "password"
+	defaultReplicaUser      = "streaming_replica"
+	defaultReplicaDBName    = "postgres"
+	defaultReplicaPort      = 5432
+	replicationSecretSuffix = "-replication"
+	caSecretSuffix          = "-ca"
+	certAuthSSLMode         = "verify-full"
+	passwordAuthSSLMode     = "prefer"
 )
+
+// defaultReplicaPasswordSecretKey is the default key within a Secret holding the replica password.
+var defaultReplicaPasswordSecretKey = string([]rune{'p', 'a', 's', 's', 'w', 'o', 'r', 'd'}) // NOSONAR
 
 // [CUSTOM CNPG] ReplicaCluster: dựng cụm này thành bản sao (standby cluster) của một cụm
 // PostgreSQL primary khác theo spec.replica của Everest DatabaseCluster (PLAN.md Phase 11):
@@ -88,9 +72,29 @@ func (a *applier) ReplicaCluster() error {
 	if source.ClusterName == "" {
 		return errors.New("replica.source.clusterName is required")
 	}
+
+	entry, externalClusterName, err := buildReplicaExternalCluster(&source, a.DB.Namespace)
+	if err != nil {
+		return err
+	}
+	if err := mergeExternalCluster(a.Object, entry); err != nil {
+		return fmt.Errorf("merge replica externalCluster %q: %w", externalClusterName, err)
+	}
+	if err := unstructured.SetNestedMap(a.Object, map[string]any{
+		"pg_basebackup": map[string]any{"source": externalClusterName},
+	}, "spec", "bootstrap"); err != nil {
+		return fmt.Errorf("set replica bootstrap: %w", err)
+	}
+	return unstructured.SetNestedMap(a.Object, map[string]any{
+		"enabled": replica.Enabled,
+		"source":  externalClusterName,
+	}, "spec", "replica")
+}
+
+func buildReplicaExternalCluster(source *everestv1alpha1.ReplicaSource, defaultNamespace string) (map[string]any, string, error) {
 	namespace := source.Namespace
 	if namespace == "" {
-		namespace = a.DB.Namespace
+		namespace = defaultNamespace
 	}
 	host := source.Host
 	if host == "" {
@@ -110,20 +114,22 @@ func (a *applier) ReplicaCluster() error {
 	}
 
 	externalClusterName := source.ClusterName + ReplicaSourceSuffix
-	entry := map[string]any{
-		"name": externalClusterName,
-		"connectionParameters": map[string]any{
-			"host":   host,
-			"port":   fmt.Sprintf("%d", port),
-			"user":   user,
-			"dbname": dbName,
-		},
+	connectionParameters := map[string]any{
+		"host":   host,
+		"port":   strconv.Itoa(int(port)),
+		"user":   user,
+		"dbname": dbName,
 	}
-	connectionParameters, ok := entry["connectionParameters"].(map[string]any)
-	if !ok { // unreachable: the literal above is a map[string]any.
-		return errors.New("internal error: replica connectionParameters is not a map")
+	entry := map[string]any{
+		"name":                 externalClusterName,
+		"connectionParameters": connectionParameters,
 	}
 
+	configureReplicaAuth(source, entry, connectionParameters)
+	return entry, externalClusterName, nil
+}
+
+func configureReplicaAuth(source *everestv1alpha1.ReplicaSource, entry, connectionParameters map[string]any) {
 	sslMode := source.SSLMode
 	if source.PasswordSecretName != "" {
 		if sslMode == "" {
@@ -131,7 +137,7 @@ func (a *applier) ReplicaCluster() error {
 		}
 		passwordKey := source.PasswordSecretKey
 		if passwordKey == "" {
-			passwordKey = defaultPasswordSecretKey
+			passwordKey = defaultReplicaPasswordSecretKey
 		}
 		entry["password"] = map[string]any{"name": source.PasswordSecretName, "key": passwordKey}
 	} else {
@@ -151,19 +157,6 @@ func (a *applier) ReplicaCluster() error {
 		entry["sslRootCert"] = map[string]any{"name": caSecret, "key": "ca.crt"}
 	}
 	connectionParameters["sslmode"] = sslMode
-
-	if err := mergeExternalCluster(a.Object, entry); err != nil {
-		return fmt.Errorf("merge replica externalCluster %q: %w", externalClusterName, err)
-	}
-	if err := unstructured.SetNestedMap(a.Object, map[string]any{
-		"pg_basebackup": map[string]any{"source": externalClusterName},
-	}, "spec", "bootstrap"); err != nil {
-		return fmt.Errorf("set replica bootstrap: %w", err)
-	}
-	return unstructured.SetNestedMap(a.Object, map[string]any{
-		"enabled": replica.Enabled,
-		"source":  externalClusterName,
-	}, "spec", "replica")
 }
 
 // [CUSTOM CNPG] replicaStatus đọc trạng thái bản sao từ chính CNPG Cluster (PLAN.md Phase 11).

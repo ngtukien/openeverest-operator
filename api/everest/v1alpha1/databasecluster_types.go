@@ -307,7 +307,6 @@ type Engine struct {
 	//
 	// NOTE: Updating this property post installation may lead to a restart of the cluster.
 	// +optional
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message=".spec.engine.crVersion cannot be changed"
 	CRVersion *string `json:"crVersion,omitempty"`
 }
 
@@ -797,7 +796,7 @@ type DatabaseClusterStatus struct {
 	Replica *ReplicaClusterStatus `json:"replica,omitempty"`
 }
 
-// [CUSTOM CNPG] ReplicaClusterStatus phản ánh trạng thái bản sao quan sát được trên CNPG Cluster.
+// ReplicaClusterStatus [CUSTOM CNPG] phản ánh trạng thái bản sao quan sát được trên CNPG Cluster.
 //
 // Không có trường độ trễ (lag) theo byte: CloudNativePG không công bố LSN trong Cluster.status,
 // nên số liệu đó chỉ lấy được qua metric "cnpg_pg_replication_lag" (Phase 8) hoặc truy vấn

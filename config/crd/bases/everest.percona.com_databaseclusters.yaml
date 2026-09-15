@@ -273,9 +273,6 @@ spec:
 
                       NOTE: Updating this property post installation may lead to a restart of the cluster.
                     type: string
-                    x-kubernetes-validations:
-                    - message: .spec.engine.crVersion cannot be changed
-                      rule: self == oldSelf
                   provider:
                     description: |-
                       [CUSTOM CNPG] Provider chọn operator bên dưới để reconcile PostgreSQL cluster.

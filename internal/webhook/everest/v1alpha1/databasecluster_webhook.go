@@ -78,12 +78,6 @@ var (
 
 	// [CUSTOM CNPG] .spec.replication — CloudNativePG-only, xem PLAN.md Phase 10.
 	dbcReplicationPath = specPath.Child("replication")
-
-	// [CUSTOM CNPG] .spec.replica — CloudNativePG-only, xem PLAN.md Phase 11.
-	dbcReplicaPath                  = specPath.Child("replica")
-	dbcReplicaEnabledPath           = dbcReplicaPath.Child("enabled")
-	dbcReplicaSourcePath            = dbcReplicaPath.Child("source")
-	dbcReplicaSourceClusterNamePath = dbcReplicaSourcePath.Child("clusterName")
 )
 
 var dbClusterGroupKind = everestv1alpha1.GroupVersion.WithKind(consts.DatabaseClusterKind).GroupKind()
@@ -128,16 +122,8 @@ func (v *DatabaseClusterValidator) ValidateCreate(ctx context.Context, db *evere
 		allErrs = append(allErrs, v.validateEngineVersion(ctx, db)...)
 	}
 
-	// If a user secret is specified by the user, ensure that it exists.
-	if userSecretsName := db.Spec.Engine.UserSecretsName; userSecretsName != "" {
-		// ensure that this secret exists.
-		secret := corev1.Secret{}
-		if err := v.Client.Get(ctx, types.NamespacedName{
-			Name:      userSecretsName,
-			Namespace: db.GetNamespace(),
-		}, &secret); err != nil {
-			allErrs = append(allErrs, errInvalidField(dbcUserSecretsNamePath, userSecretsName, err.Error()))
-		}
+	if err := v.validateUserSecret(ctx, db); err != nil {
+		allErrs = append(allErrs, err)
 	}
 
 	// If a data import source is specified, validate it.
@@ -273,14 +259,39 @@ func (v *DatabaseClusterValidator) validateDataImport(
 	return nil
 }
 
+func (v *DatabaseClusterValidator) validateUserSecret(ctx context.Context, db *everestv1alpha1.DatabaseCluster) *field.Error {
+	if userSecretsName := db.Spec.Engine.UserSecretsName; userSecretsName != "" {
+		secret := corev1.Secret{}
+		if err := v.Client.Get(ctx, types.NamespacedName{
+			Name:      userSecretsName,
+			Namespace: db.GetNamespace(),
+		}, &secret); err != nil {
+			return errInvalidField(dbcUserSecretsNamePath, userSecretsName, err.Error())
+		}
+	}
+	return nil
+}
+
 func (v *DatabaseClusterValidator) validateCNPGCapabilities(
 	ctx context.Context,
 	db *everestv1alpha1.DatabaseCluster,
 	checkCRD bool,
 ) field.ErrorList {
 	var allErrs field.ErrorList
-	engine := db.Spec.Engine
 
+	allErrs = append(allErrs, validateCNPGEngine(db.Spec.Engine)...)
+	allErrs = append(allErrs, validateCNPGProxy(db.Spec.Proxy)...)
+	allErrs = append(allErrs, validateCNPGUnsupportedFeatures(db)...)
+
+	if checkCRD {
+		allErrs = append(allErrs, v.validateCNPGCRD(ctx, string(db.Spec.Engine.Provider))...)
+	}
+
+	return allErrs
+}
+
+func validateCNPGEngine(engine everestv1alpha1.Engine) field.ErrorList {
+	var allErrs field.ErrorList
 	if engine.Type != everestv1alpha1.DatabaseEnginePostgresql {
 		allErrs = append(allErrs, field.Forbidden(dbcEngineProviderPath, "cloudnative-pg is only supported for PostgreSQL"))
 	}
@@ -292,8 +303,11 @@ func (v *DatabaseClusterValidator) validateCNPGCapabilities(
 	if engine.CRVersion != nil {
 		allErrs = append(allErrs, field.Forbidden(dbcEngineCRVersionPath, "CloudNativePG does not use Everest CR versions"))
 	}
+	return allErrs
+}
 
-	proxy := db.Spec.Proxy
+func validateCNPGProxy(proxy everestv1alpha1.Proxy) field.ErrorList {
+	var allErrs field.ErrorList
 	unsupportedProxyMessage := "CloudNativePG does not use an Everest-managed proxy; configure only spec.proxy.expose"
 	if proxy.Type != "" {
 		allErrs = append(allErrs, field.Forbidden(dbcProxyTypePath, unsupportedProxyMessage))
@@ -311,6 +325,11 @@ func (v *DatabaseClusterValidator) validateCNPGCapabilities(
 	if len(proxyResources.Limits) != 0 || len(proxyResources.Requests) != 0 {
 		allErrs = append(allErrs, field.Forbidden(dbcProxyResourcesPath, unsupportedProxyMessage))
 	}
+	return allErrs
+}
+
+func validateCNPGUnsupportedFeatures(db *everestv1alpha1.DatabaseCluster) field.ErrorList {
+	var allErrs field.ErrorList
 	if db.Spec.Monitoring != nil {
 		allErrs = append(allErrs, field.Forbidden(dbcMonitoringPath, "PMM monitoring is not yet supported by the CloudNativePG provider"))
 	}
@@ -323,26 +342,26 @@ func (v *DatabaseClusterValidator) validateCNPGCapabilities(
 	if db.Spec.Paused {
 		allErrs = append(allErrs, field.Forbidden(dbcPausedPath, "pausing is not yet supported by the CloudNativePG provider"))
 	}
-
-	if checkCRD {
-		crd := &apiextensionsv1.CustomResourceDefinition{}
-		err := v.Client.Get(ctx, types.NamespacedName{Name: consts.CNPGClusterCRDName}, crd)
-		switch {
-		case apierrors.IsNotFound(err):
-			allErrs = append(allErrs, field.Forbidden(
-				dbcEngineProviderPath,
-				fmt.Sprintf("CloudNativePG CRD %q is not installed", consts.CNPGClusterCRDName),
-			))
-		case err != nil:
-			allErrs = append(allErrs, errInvalidField(
-				dbcEngineProviderPath,
-				string(engine.Provider),
-				fmt.Sprintf("could not verify CloudNativePG availability: %v", err),
-			))
-		}
-	}
-
 	return allErrs
+}
+
+func (v *DatabaseClusterValidator) validateCNPGCRD(ctx context.Context, provider string) field.ErrorList {
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+	err := v.Client.Get(ctx, types.NamespacedName{Name: consts.CNPGClusterCRDName}, crd)
+	switch {
+	case apierrors.IsNotFound(err):
+		return field.ErrorList{field.Forbidden(
+			dbcEngineProviderPath,
+			fmt.Sprintf("CloudNativePG CRD %q is not installed", consts.CNPGClusterCRDName),
+		)}
+	case err != nil:
+		return field.ErrorList{errInvalidField(
+			dbcEngineProviderPath,
+			provider,
+			fmt.Sprintf("could not verify CloudNativePG availability: %v", err),
+		)}
+	}
+	return nil
 }
 
 func validateCNPGVersionUpdate(oldVersion, newVersion string) field.ErrorList {

@@ -1,6 +1,17 @@
 // everest-operator
 // Copyright (C) 2022 Percona LLC
-// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package cnpg
 
@@ -84,14 +95,9 @@ func (a *applier) Engine() error {
 	if err := validateVersionChange(currentImage, engine.Version); err != nil {
 		return err
 	}
-	currentSize := resource.Quantity{}
-	if size, found, nestedErr := unstructured.NestedString(a.Object, "spec", "storage", "size"); nestedErr != nil {
-		return fmt.Errorf("read current CloudNativePG storage size: %w", nestedErr)
-	} else if found && size != "" {
-		currentSize, err = resource.ParseQuantity(size)
-		if err != nil {
-			return fmt.Errorf("parse current CloudNativePG storage size %q: %w", size, err)
-		}
+	currentSize, err := a.currentStorageSize()
+	if err != nil {
+		return err
 	}
 
 	resourceRequirements := engine.Resources.ToResourceRequirements()
@@ -144,15 +150,39 @@ func (a *applier) Engine() error {
 	if parameters := parsePostgreSQLParameters(engine.Config); len(parameters) != 0 {
 		spec["postgresql"] = map[string]any{"parameters": parameters}
 	}
+	if err := a.configureMonitoring(spec); err != nil {
+		return err
+	}
+	a.Object["spec"] = spec
+	return nil
+}
+
+func (a *applier) currentStorageSize() (resource.Quantity, error) {
+	size, found, err := unstructured.NestedString(a.Object, "spec", "storage", "size")
+	if err != nil {
+		return resource.Quantity{}, fmt.Errorf("read current CloudNativePG storage size: %w", err)
+	}
+	if !found || size == "" {
+		return resource.Quantity{}, nil
+	}
+	currentSize, err := resource.ParseQuantity(size)
+	if err != nil {
+		return resource.Quantity{}, fmt.Errorf("parse current CloudNativePG storage size %q: %w", size, err)
+	}
+	return currentSize, nil
+}
+
+func (a *applier) configureMonitoring(spec map[string]any) error {
 	// [CUSTOM CNPG] Phase 8 (Observability): chỉ bật enablePodMonitor khi CRD PodMonitor của
 	// Prometheus Operator đã cài trên cụm; nếu không, CNPG Cluster vẫn expose metrics ở cổng
 	// "metrics" (9187) nhưng không tự sinh PodMonitor. Xem PLAN.md Phase 8.
-	if podMonitorInstalled, err := podMonitorCRDInstalled(a.ctx, a.C); err != nil {
+	podMonitorInstalled, err := podMonitorCRDInstalled(a.ctx, a.C)
+	if err != nil {
 		return fmt.Errorf("check PodMonitor CRD: %w", err)
-	} else if podMonitorInstalled {
+	}
+	if podMonitorInstalled {
 		spec["monitoring"] = map[string]any{"enablePodMonitor": true}
 	}
-	a.Object["spec"] = spec
 	return nil
 }
 
