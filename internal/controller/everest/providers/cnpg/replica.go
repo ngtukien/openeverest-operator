@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strconv"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	everestv1alpha1 "github.com/percona/everest-operator/api/everest/v1alpha1"
@@ -42,9 +43,6 @@ const (
 	certAuthSSLMode         = "verify-full"
 	passwordAuthSSLMode     = "prefer"
 )
-
-// defaultReplicaPasswordSecretKey is the default key within a Secret holding the replica password.
-var defaultReplicaPasswordSecretKey = string([]rune{'p', 'a', 's', 's', 'w', 'o', 'r', 'd'}) // NOSONAR
 
 // [CUSTOM CNPG] ReplicaCluster: dựng cụm này thành bản sao (standby cluster) của một cụm
 // PostgreSQL primary khác theo spec.replica của Everest DatabaseCluster (PLAN.md Phase 11):
@@ -137,7 +135,7 @@ func configureReplicaAuth(source *everestv1alpha1.ReplicaSource, entry, connecti
 		}
 		passwordKey := source.PasswordSecretKey
 		if passwordKey == "" {
-			passwordKey = defaultReplicaPasswordSecretKey
+			passwordKey = corev1.BasicAuthPasswordKey
 		}
 		entry["password"] = map[string]any{"name": source.PasswordSecretName, "key": passwordKey}
 	} else {

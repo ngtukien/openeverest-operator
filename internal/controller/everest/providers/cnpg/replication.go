@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -130,7 +131,7 @@ func (a *applier) reconcileSubscription(sub everestv1alpha1.ReplicationSubscript
 	}
 	passwordKey := source.PasswordSecretKey
 	if passwordKey == "" {
-		passwordKey = string([]rune{'p', 'a', 's', 's', 'w', 'o', 'r', 'd'}) // NOSONAR
+		passwordKey = corev1.BasicAuthPasswordKey
 	}
 	externalClusterName := sub.Name + "-source"
 	externalCluster := map[string]any{
