@@ -387,6 +387,22 @@ func (p *applier) DataImport() error {
 	return common.ReconcileDBFromDataImport(p.ctx, p.C, p.DB)
 }
 
+// [CUSTOM CNPG] Replication is CloudNativePG-only; xem PLAN.md Phase 10.
+func (p *applier) Replication() error {
+	if p.DB.Spec.Replication != nil {
+		return errors.New("logical replication is not supported by the Percona Server for MongoDB provider")
+	}
+	return nil
+}
+
+// [CUSTOM CNPG] ReplicaCluster is CloudNativePG-only; xem PLAN.md Phase 11.
+func (p *applier) ReplicaCluster() error {
+	if p.DB.Spec.Replica != nil {
+		return errors.New("replica clusters are not supported by the Percona Server for MongoDB provider")
+	}
+	return nil
+}
+
 func (p *applier) Monitoring() error {
 	monitoring, err := common.GetDBMonitoringConfig(p.ctx, p.C, p.DB)
 	if err != nil {

@@ -161,6 +161,10 @@ type Applier interface {
 	Backup() error
 	Metadata() error
 	ResetDefaults() error
+	// [CUSTOM CNPG] Replication reconciles logical replication (Publication/Subscription). See PLAN.md Phase 10.
+	Replication() error
+	// [CUSTOM CNPG] ReplicaCluster reconciles physical replica-cluster (cross-zone DR) settings. See PLAN.md Phase 11.
+	ReplicaCluster() error
 }
 
 // Storage is the storage configuration.
@@ -275,9 +279,10 @@ type Engine struct {
 	// +kubebuilder:validation:Enum:=pxc;postgresql;psmdb
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message=".spec.engine.type cannot be changed"
 	Type EngineType `json:"type"`
-	// Provider selects the PostgreSQL operator used to reconcile this cluster.
-	// Empty preserves the historical behavior and uses Percona PostgreSQL.
-	// This field is ignored for non-PostgreSQL engines.
+	// [CUSTOM CNPG] Provider chọn operator bên dưới để reconcile PostgreSQL cluster.
+	// Hỗ trợ "percona-postgresql" (mặc định) và "cloudnative-pg".
+	// Giá trị này là bất biến (immutable) sau khi khởi tạo, tránh đổi runtime giữa chừng.
+	// Trường này bị bỏ qua đối với các engine không phải PostgreSQL (pxc, psmdb).
 	// +optional
 	// +kubebuilder:validation:Enum:=percona-postgresql;cloudnative-pg
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message=".spec.engine.provider cannot be changed"
@@ -305,17 +310,18 @@ type Engine struct {
 	CRVersion *string `json:"crVersion,omitempty"`
 }
 
-// DatabaseEngineProvider selects the operator implementation behind an engine.
+// DatabaseEngineProvider identifies the underlying operator implementation for an engine.
 type DatabaseEngineProvider string
 
 const (
-	// DatabaseEngineProviderPerconaPostgresql preserves Everest's existing PostgreSQL implementation.
+	// DatabaseEngineProviderPerconaPostgresql retains default behavior using Percona PG Operator.
 	DatabaseEngineProviderPerconaPostgresql DatabaseEngineProvider = "percona-postgresql"
-	// DatabaseEngineProviderCloudNativePG selects the CloudNativePG implementation.
+	// DatabaseEngineProviderCloudNativePG directs reconcile to CloudNativePG Operator.
 	DatabaseEngineProviderCloudNativePG DatabaseEngineProvider = "cloudnative-pg"
 )
 
-// EffectiveProvider returns the provider with backward-compatible defaults.
+// EffectiveProvider returns the effective provider, defaulting to Percona
+// if unset to ensure 100% backward compatibility.
 func (e *Engine) EffectiveProvider() DatabaseEngineProvider {
 	if e.Type == DatabaseEnginePostgresql && e.Provider == "" {
 		return DatabaseEngineProviderPerconaPostgresql
@@ -543,6 +549,7 @@ type EngineFeaturesStatus struct {
 }
 
 // DatabaseClusterSpec defines the desired state of DatabaseCluster.
+// [CUSTOM CNPG] Ràng buộc validation: chỉ engine type "postgresql" mới được phép có trường "provider".
 // +kubebuilder:validation:XValidation:rule="self.engine.type == 'postgresql' || !has(self.engine.provider)",message=".spec.engine.provider is only supported for PostgreSQL"
 type DatabaseClusterSpec struct {
 	// Paused is a flag to stop the cluster
@@ -557,8 +564,8 @@ type DatabaseClusterSpec struct {
 	// proxy specification will be applied for the given engine. A
 	// common use case for setting this field is to control the
 	// external access to the database cluster.
-	// For the CloudNativePG provider, Everest does not create a proxy or expose
-	// read-replica endpoints; only Proxy.Expose configures the read-write Service.
+	// [CUSTOM CNPG] Với provider CloudNativePG, Everest không sinh proxy trung gian (như PgBouncer)
+	// mà chỉ tái sử dụng Proxy.Expose để cấu hình Service RW (LoadBalancer/ClusterIP) trỏ thẳng vào Primary.
 	Proxy Proxy `json:"proxy,omitempty"`
 	// DataSource defines a data source for bootstraping a new cluster
 	DataSource *DataSource `json:"dataSource,omitempty"`
@@ -572,6 +579,135 @@ type DatabaseClusterSpec struct {
 	PodSchedulingPolicyName string `json:"podSchedulingPolicyName,omitempty"`
 	// EngineFeatures represents configuration of additional features for the database engine.
 	EngineFeatures *EngineFeatures `json:"engineFeatures,omitempty"`
+	// [CUSTOM CNPG] Replication configures PostgreSQL logical replication (Publication/Subscription)
+	// on top of this cluster. CloudNativePG-only; xem PLAN.md Phase 10.
+	Replication *Replication `json:"replication,omitempty"`
+	// [CUSTOM CNPG] Replica turns this cluster into a CloudNativePG replica cluster: bootstrapped
+	// from an external primary via pg_basebackup, then kept in sync by physical streaming
+	// replication. CloudNativePG-only; xem PLAN.md Phase 11.
+	Replica *ReplicaCluster `json:"replica,omitempty"`
+}
+
+// ReplicaCluster configures this cluster as a standby replica cluster of another
+// PostgreSQL primary cluster — typically across zones or Kubernetes clusters for Disaster
+// Recovery. Everest maps this to "spec.replica", "spec.bootstrap.pg_basebackup" and an
+// entry in "spec.externalClusters" on the CNPG Cluster.
+type ReplicaCluster struct {
+	// Enabled keeps this cluster in read-only standby mode, continuously replaying WAL from
+	// Source. Setting it to false promotes the cluster to a writable primary — the DR drill —
+	// and is a one-way transition: a promoted cluster cannot be demoted back by setting it to
+	// true again, it has to be re-bootstrapped.
+	// +kubebuilder:default=true
+	Enabled bool `json:"enabled"`
+	// Source is the primary cluster to bootstrap and stream from.
+	Source ReplicaSource `json:"source"`
+}
+
+// ReplicaSource is the connection info for the primary cluster a ReplicaCluster streams from.
+// Authentication defaults to the client certificate CloudNativePG generates on the source
+// cluster; set PasswordSecretName to use password authentication instead.
+type ReplicaSource struct {
+	// ClusterName is the name of the source (primary) CloudNativePG cluster. Everest derives the
+	// streaming endpoint and the CloudNativePG-generated TLS Secret names from it.
+	ClusterName string `json:"clusterName"`
+	// Namespace holding the source cluster. Defaults to this cluster's namespace.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+	// Host overrides the derived "<clusterName>-rw.<namespace>.svc" endpoint. Set it when the
+	// primary lives in another Kubernetes cluster and is reached through an external address.
+	// +optional
+	Host string `json:"host,omitempty"`
+	// Port on the source. Defaults to 5432.
+	// +optional
+	Port int32 `json:"port,omitempty"`
+	// DBName to connect to on the source. Defaults to "postgres".
+	// +optional
+	DBName string `json:"dbName,omitempty"`
+	// User is the replication-capable role to connect as. Defaults to "streaming_replica",
+	// the role CloudNativePG creates on every cluster.
+	// +optional
+	User string `json:"user,omitempty"`
+	// SSLMode is the libpq sslmode. Defaults to "verify-full" for certificate authentication
+	// and "prefer" for password authentication.
+	// +optional
+	SSLMode string `json:"sslMode,omitempty"`
+	// ClientCertSecretName is a Secret holding tls.crt/tls.key of the replication client
+	// certificate. Defaults to "<clusterName>-replication", the Secret CloudNativePG generates
+	// on the source cluster. Ignored when PasswordSecretName is set.
+	// +optional
+	ClientCertSecretName string `json:"clientCertSecretName,omitempty"`
+	// CASecretName is a Secret holding ca.crt of the source cluster's CA. Defaults to
+	// "<clusterName>-ca". Ignored when PasswordSecretName is set.
+	// +optional
+	CASecretName string `json:"caSecretName,omitempty"`
+	// PasswordSecretName selects password authentication instead of certificate
+	// authentication, using the named Secret in this cluster's namespace.
+	// +optional
+	PasswordSecretName string `json:"passwordSecretName,omitempty"`
+	// PasswordSecretKey is the key inside PasswordSecretName. Defaults to "password".
+	// +optional
+	PasswordSecretKey string `json:"passwordSecretKey,omitempty"`
+}
+
+// Replication configures PostgreSQL logical replication (Publication/Subscription)
+// to be reconciled on this cluster. Everest maps this to CloudNativePG CRDs
+// "Publication" and "Subscription" (postgresql.cnpg.io/v1).
+type Replication struct {
+	// Publications to create on this cluster.
+	Publications []ReplicationPublication `json:"publications,omitempty"`
+	// Subscriptions to create on this cluster, each pulling from an external PostgreSQL source.
+	Subscriptions []ReplicationSubscription `json:"subscriptions,omitempty"`
+}
+
+// ReplicationTarget selects which tables a Publication replicates.
+type ReplicationTarget struct {
+	// AllTables replicates every table in the database (PostgreSQL "FOR ALL TABLES").
+	AllTables bool `json:"allTables,omitempty"`
+	// Tables restricts replication to specific "schema.table" names. Ignored when allTables is true.
+	Tables []string `json:"tables,omitempty"`
+}
+
+// ReplicationPublication declares a PostgreSQL PUBLICATION owned by this cluster.
+type ReplicationPublication struct {
+	// Name is the PostgreSQL publication name.
+	Name string `json:"name"`
+	// DBName is the database on this cluster that owns the publication.
+	DBName string `json:"dbName"`
+	// Target selects which tables are published. Defaults to allTables when unset.
+	Target ReplicationTarget `json:"target,omitempty"`
+}
+
+// ReplicationSourceConnection is the libpq connection info for an external PostgreSQL
+// publisher that a ReplicationSubscription pulls from.
+type ReplicationSourceConnection struct {
+	// Host is the source PostgreSQL host or Service DNS name.
+	Host string `json:"host"`
+	// Port is the source PostgreSQL port. Defaults to 5432.
+	Port int32 `json:"port,omitempty"`
+	// DBName is the database on the source to connect to.
+	DBName string `json:"dbName"`
+	// User is the replication-capable PostgreSQL role to connect as.
+	User string `json:"user"`
+	// SSLMode is the libpq sslmode. Defaults to "prefer".
+	SSLMode string `json:"sslMode,omitempty"`
+	// PasswordSecretName is a Secret in the same namespace holding the source user's password.
+	PasswordSecretName string `json:"passwordSecretName"`
+	// PasswordSecretKey is the key inside PasswordSecretName. Defaults to "password".
+	PasswordSecretKey string `json:"passwordSecretKey,omitempty"`
+}
+
+// ReplicationSubscription declares a PostgreSQL SUBSCRIPTION on this cluster, pulling from an
+// external publisher. Everest auto-generates the matching CloudNativePG externalCluster entry
+// from Source; users do not manage spec.externalClusters directly for this purpose.
+type ReplicationSubscription struct {
+	// Name is the PostgreSQL subscription name.
+	Name string `json:"name"`
+	// DBName is the database on this cluster that receives the subscription.
+	DBName string `json:"dbName"`
+	// PublicationName is the name of the publication on the source to subscribe to.
+	PublicationName string `json:"publicationName"`
+	// Source is the connection info for the external publisher.
+	Source ReplicationSourceConnection `json:"source"`
 }
 
 // IntoDBRestoreDataSource converts the DataSource into a DatabaseClusterRestoreDataSource.
@@ -654,6 +790,30 @@ type DatabaseClusterStatus struct {
 	// Conditions contains the observed conditions of the DatabaseCluster.
 	Conditions     []metav1.Condition    `json:"conditions,omitempty"`
 	EngineFeatures *EngineFeaturesStatus `json:"engineFeatures,omitempty"`
+	// [CUSTOM CNPG] Replica reports the observed replica-cluster (cross-zone DR) state.
+	// Set only when .spec.replica is configured; xem PLAN.md Phase 11.
+	// +optional
+	Replica *ReplicaClusterStatus `json:"replica,omitempty"`
+}
+
+// ReplicaClusterStatus [CUSTOM CNPG] phản ánh trạng thái bản sao quan sát được trên CNPG Cluster.
+//
+// Không có trường độ trễ (lag) theo byte: CloudNativePG không công bố LSN trong Cluster.status,
+// nên số liệu đó chỉ lấy được qua metric "cnpg_pg_replication_lag" (Phase 8) hoặc truy vấn
+// pg_wal_lsn_diff trực tiếp trên designated primary. Xem PLAN.md Phase 11.
+type ReplicaClusterStatus struct {
+	// Enabled is true while this cluster is a read-only standby, false once it has been promoted.
+	Enabled bool `json:"enabled"`
+	// SourceCluster is the name of the .spec.externalClusters entry being streamed from.
+	// +optional
+	SourceCluster string `json:"sourceCluster,omitempty"`
+	// SourceHost is the endpoint the WAL is streamed from.
+	// +optional
+	SourceHost string `json:"sourceHost,omitempty"`
+	// DesignatedPrimary is the Pod acting as the writable leader of the replica cluster: the
+	// instance that streams from SourceHost and cascades to the other replicas.
+	// +optional
+	DesignatedPrimary string `json:"designatedPrimary,omitempty"`
 }
 
 // +kubebuilder:object:root=true

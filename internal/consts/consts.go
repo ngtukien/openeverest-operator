@@ -42,10 +42,16 @@ const (
 	PSMDBDeploymentName = "percona-server-mongodb-operator"
 	// PGDeploymentName is the name of the Percona PostgreSQL operator deployment.
 	PGDeploymentName = "percona-postgresql-operator"
-	// CNPGDeploymentName is the name of the CloudNativePG operator deployment.
+	// CNPGDeploymentName [CUSTOM CNPG] Tên Deployment và Namespace của CloudNativePG Operator trên cụm K8s.
 	CNPGDeploymentName = "cnpg-controller-manager"
 	// CNPGOperatorNamespace is the namespace used by the cluster-wide CNPG installation.
 	CNPGOperatorNamespace = "cnpg-system"
+	// CNPGClusterCRDName is the cluster-scoped CRD required by the CloudNativePG provider.
+	CNPGClusterCRDName = "clusters.postgresql.cnpg.io"
+	// PodMonitorCRDName [CUSTOM CNPG] là CRD của Prometheus Operator. Chỉ khi CRD này tồn tại
+	// trên cụm K8s, CNPG provider mới bật "spec.monitoring.enablePodMonitor" cho Cluster —
+	// tránh lỗi reconcile khi lab chưa cài Prometheus Operator (xem PLAN.md Phase 8).
+	PodMonitorCRDName = "podmonitors.monitoring.coreos.com"
 
 	// PXCAPIGroup is the API group for Percona XtraDB Cluster.
 	PXCAPIGroup = "pxc.percona.com"
@@ -53,7 +59,7 @@ const (
 	PSMDBAPIGroup = "psmdb.percona.com"
 	// PGAPIGroup is the API group for Percona PostgreSQL.
 	PGAPIGroup = "pgv2.percona.com"
-	// CNPGAPIGroup is the API group for CloudNativePG.
+	// CNPGAPIGroup [CUSTOM CNPG] API Group chính thức của CloudNativePG ("postgresql.cnpg.io").
 	CNPGAPIGroup = "postgresql.cnpg.io"
 
 	// PerconaXtraDBClusterKind is the kind for Percona XtraDB Cluster.
@@ -62,12 +68,16 @@ const (
 	PerconaServerMongoDBKind = "PerconaServerMongoDB"
 	// PerconaPGClusterKind is the kind for Percona PostgreSQL.
 	PerconaPGClusterKind = "PerconaPGCluster"
-	// CNPGClusterKind is the kind for a CloudNativePG PostgreSQL cluster.
+	// CNPGClusterKind [CUSTOM CNPG] là CR Kind cho CloudNativePG Cluster.
 	CNPGClusterKind = "Cluster"
-	// CNPGBackupKind is the kind for an on-demand CloudNativePG backup.
+	// CNPGBackupKind is the Kind for CNPG Backup CRD.
 	CNPGBackupKind = "Backup"
-	// CNPGScheduledBackupKind is the kind for a CloudNativePG backup schedule.
+	// CNPGScheduledBackupKind is the Kind for CNPG ScheduledBackup CRD.
 	CNPGScheduledBackupKind = "ScheduledBackup"
+	// CNPGPublicationKind [CUSTOM CNPG] là CRD logical replication của CloudNativePG.
+	CNPGPublicationKind = "Publication"
+	// CNPGSubscriptionKind [CUSTOM CNPG] là CRD logical replication Subscription của CloudNativePG.
+	CNPGSubscriptionKind = "Subscription"
 	// PerconaXtraDBClusterRestoreKind is the kind for Percona XtraDB Cluster restore.
 	PerconaXtraDBClusterRestoreKind = "PerconaXtraDBClusterRestore"
 	// LoadBalancerConfigKind is the kind for load balancer configs.

@@ -1,193 +1,378 @@
-# Plan bổ sung CloudNativePG cho Everest Operator v1.16.2
+# KẾ HOẠCH TÍCH HỢP CLOUDNATIVE-PG VÀO OPENEVEREST OPERATOR v1.16.2
 
-## 1. Mục tiêu và nguyên tắc tương thích
+Tài liệu này đặc tả chi tiết **Kiến trúc kỹ thuật**, **Danh mục công việc (Tasks)**, **Ánh xạ mã nguồn (Code Mapping)** và **Tiêu chí nghiệm thu (Acceptance Criteria)** cho từng Phase trong lộ trình tích hợp CloudNativePG (CNPG) làm một Provider CSDL PostgreSQL chính thức trên OpenEverest.
 
-Mục tiêu là bổ sung CloudNativePG (CNPG) làm một PostgreSQL provider của Everest,
-không thay thế hoặc xóa Percona PostgreSQL hiện có.
+---
 
-```yaml
-spec:
-  engine:
-    type: postgresql
-    provider: cloudnative-pg
-```
+## 🏛️ TỔNG QUAN KIẾN TRÚC TÍCH HỢP (ARCHITECTURE OVERVIEW)
 
-Quy tắc tương thích:
-
-- PostgreSQL không khai báo `spec.engine.provider` tiếp tục dùng `percona-postgresql`.
-- Provider là immutable; không chuyển trực tiếp cluster đang chạy giữa Percona và CNPG.
-- Everest sở hữu native database CR; database operator sở hữu Pod, PVC, Service và tài nguyên runtime bên dưới.
-- Capability chưa hỗ trợ phải bị từ chối rõ ràng, không silently ignore hoặc tạo nhầm CR của provider còn lại.
-
-## 2. Quyết định endpoint, proxy và luồng đọc/ghi
-
-CNPG không dùng Patroni. Primary election và failover do CNPG operator, Instance
-Manager và Kubernetes Lease xử lý.
-
-MVP không triển khai HAProxy, PgBouncer/CNPG `Pooler`, hoặc read/write splitting:
+OpenEverest Operator đóng vai trò là **Meta-Operator (Lớp trừu tượng hóa DBaaS)**. Khi người dùng khai báo `DatabaseCluster` với `spec.engine.provider: cloudnative-pg`, Everest sẽ tự động điều phối và chuyển đổi (reconcile) thành các tài nguyên native của CloudNativePG Operator:
 
 ```text
-Client
-  │ reconnect/retry
-  ▼
-Everest hostname: <cluster>-rw hoặc <cluster>-rw-external
-  │ selectorType: rw
-  ▼
-CNPG primary hiện tại
+       [ LẬP TRÌNH VIÊN / DEVOPS / REST API ]
+                          │
+                          │ kubectl apply (CRD DatabaseCluster)
+                          ▼
+      ┌────────────────────────────────────────────────────────┐
+      │               OpenEverest Operator                     │
+      │   - Controller: databasecluster_controller.go          │
+      │   - Adapter:    providers/cnpg (Provider & Applier)    │
+      └───────────────────────────┬────────────────────────────┘
+                                  │
+                   Sinh CRD Native của CloudNativePG:
+                   • Cluster (postgresql.cnpg.io/v1)
+                   • Backup & ScheduledBackup
+                   • Managed Services (RW Endpoint)
+                                  ▼
+      ┌────────────────────────────────────────────────────────┐
+      │             CloudNativePG Operator                     │
+      │             (cnpg-controller-manager)                  │
+      └───────────────────────────┬────────────────────────────┘
+                                  │
+        ┌─────────────────────────┼─────────────────────────┐
+        ▼                         ▼                         ▼
+ ┌──────────────┐          ┌──────────────┐          ┌──────────────┐
+ │ Pods (CNPG)  │          │ K8s Services │          │ Barman S3    │
+ │ Direct Pod   │          │ <cluster>-rw │          │ Object Store │
+ │ Management   │          │ (LoadBalancer│          │ (SeaweedFS / │
+ │ + PVC riêng  │          │  /ClusterIP) │          │  MinIO / AWS)│
+ └──────────────┘          └──────────────┘          └──────────────┘
 ```
 
-Contract endpoint:
+### Nguyên tắc tương thích cốt lõi:
+1. **Zero Breaking Changes:** Khi `spec.engine.provider` để trống, Everest mặc định 100% sử dụng `percona-postgresql` như cũ.
+2. **Tính bất biến (Immutability):** Provider không thể chuyển đổi giữa chừng trên một cụm CSDL đang chạy.
+3. **Decoupled Architecture:** Everest Operator tương tác với CNPG qua **Dynamic Unstructured Client**, không bị phụ thuộc tĩnh (hard compile-time dependency) vào Go package của CNPG.
 
-- Everest chỉ công bố một endpoint read-write trong `DatabaseCluster.status.hostname`.
-- CNPG tự chuyển backend của service RW sang primary mới sau failover; DNS/LB endpoint không đổi.
-- Connection đang mở có thể bị ngắt, nên client phải reconnect/retry.
-- Không công bố service `-ro`/`-r` qua Everest API để tránh stale reads, read-after-write không nhất quán và routing nhầm replica đang lag.
-- Với CNPG, chỉ `spec.proxy.expose` được tái sử dụng để cấu hình Service exposure. Các trường tạo proxy thực (`type`, `replicas`, `config`, `storage`, `resources`) là unsupported.
-- Không có PgBouncer thì phải sizing `max_connections`, timeout và application-side pooling/retry để tránh connection storm sau failover.
-- DR giữa hai CNPG Cluster không tự dùng chung endpoint; chuyển A sang B cần fencing, promotion và DNS/LB automation riêng.
+---
 
-## Phase 1 — Provider API, CNPG registration và compatibility
+## 📅 CHI TIẾT CÔNG VIỆC VÀ KIẾN TRÚC TỪNG PHASE
 
-Trạng thái: **đã implement ở mức code, chờ cluster acceptance**.
+---
 
-- Thêm `spec.engine.provider` với `percona-postgresql` và `cloudnative-pg`.
-- Empty provider mặc định về Percona để giữ backward compatibility.
-- Thêm CNPG API group/kind constants và RBAC cho `Cluster`.
-- Giữ nguyên Percona discovery, version service, scheme, RBAC và provider implementation.
-- Chỉ đăng ký CNPG watcher khi CRD `clusters.postgresql.cnpg.io` tồn tại.
-- Đồng bộ CRD, bundle và CSV packaging.
+### Phase 1 — Provider API, Schema & Dynamic Discovery
+* **Trạng thái:** ✅ **ĐÃ HOÀN THÀNH (100% CODE)**
 
-## Phase 2 — CNPG database provider
+#### 1. Kiến trúc kỹ thuật:
+Mở rộng API Schema của Everest để hỗ trợ thêm trường `provider`. Để tránh lỗi khởi động Operator trên các cụm K8s chưa cài đặt CRD của CNPG, cơ chế **Dynamic Discovery** được áp dụng: Everest chỉ đăng ký Watcher cho CNPG khi CRD `clusters.postgresql.cnpg.io` đã tồn tại trên K8s API server.
 
-Trạng thái: **đã implement lõi ở mức code, chờ cluster acceptance**.
+```text
+[ReconcileWatchers] ─── Kiểm tra API Server ───► Có CRD clusters.postgresql.cnpg.io?
+                                                      │
+                                                      ├─ CÓ ──► Đăng ký Watcher Unstructured CNPG
+                                                      └─ KHÔNG ► Bỏ qua an toàn (IsNotFound)
+```
 
-| Everest | CloudNativePG |
-|---|---|
-| `engine.version` | `spec.imageName` |
-| `engine.replicas` | `spec.instances` |
-| CPU/RAM | `spec.resources` |
-| storage size/class | `spec.storage` |
-| PostgreSQL config | `spec.postgresql.parameters` |
-| scheduling policy | `spec.affinity` |
-| user secret | `spec.bootstrap.initdb.secret` |
-| `proxy.expose` | RW managed Service |
+#### 2. Danh mục công việc & Files liên quan:
+- [`api/everest/v1alpha1/databasecluster_types.go`](file:///home/ngtukien/Projects/DBaaS/operator/api/everest/v1alpha1/databasecluster_types.go):
+  - Thêm trường `spec.engine.provider` (`cloudnative-pg` | `percona-postgresql`).
+  - Thêm enum `DatabaseEngineProvider` và hàm fallback `EffectiveProvider()`.
+  - Thêm validation rule: chỉ `engine.type: postgresql` mới được khai báo `provider`.
+- [`internal/consts/consts.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/consts/consts.go):
+  - Khai báo các hằng số: `CNPGAPIGroup`, `CNPGClusterKind`, `CNPGDeploymentName`, `CNPGOperatorNamespace`.
+- [`internal/controller/everest/databasecluster_controller.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/databasecluster_controller.go):
+  - `ReconcileWatchers()`: Khởi tạo dynamic watcher cho đối tượng CNPG Cluster.
 
-Provider hỗ trợ create, update và delete. Pause, PMM, backup, restore và import
-CNPG hiện trả lỗi explicit.
+#### 3. Tiêu chí nghiệm thu (Acceptance Criteria):
+- Tạo `DatabaseCluster` không có provider $\rightarrow$ Tự động gán `percona-postgresql`.
+- Tạo `DatabaseCluster` với `provider: cloudnative-pg` $\rightarrow$ Nhận diện chính xác và không sinh CR của Percona.
+- Operator khởi động bình thường kể cả khi cụm K8s chưa cài đặt CRD của CNPG.
 
-## Phase 3 — Status, ownership và endpoint failover
+---
 
-Trạng thái: **đã implement cơ bản ở mức code, chờ E2E**.
+### Phase 2 — CNPG Database Provider Adapter (Core Translation)
+* **Trạng thái:** ✅ **ĐÃ HOÀN THÀNH (100% CODE)**
 
-- CNPG `Ready=True` và đủ `readyInstances` → Everest `Ready`.
-- Map desired/ready instance count, port `5432` và status details.
-- `status.hostname` luôn là endpoint RW, không trả endpoint replica.
-- Owner reference: Everest `DatabaseCluster` → CNPG `Cluster`.
-- Watch CNPG Cluster status khi CRD được cài.
-- Cleanup finalizer không xóa nhầm backup/PVC và không ảnh hưởng Percona.
+#### 1. Kiến trúc kỹ thuật:
+Hiện thực hóa Adapter Pattern qua interface `providers.Provider` và `everestv1alpha1.Applier`. Adapter nhận dữ liệu từ `DatabaseClusterSpec` và biên dịch thành `spec` của CNPG `Cluster` (`postgresql.cnpg.io/v1`).
 
-Acceptance bắt buộc:
+```text
+Everest DatabaseCluster                         CloudNativePG Cluster
+├── engine.version       ───────────────►       ├── spec.imageName (ghcr.io/...)
+├── engine.replicas      ───────────────►       ├── spec.instances
+├── engine.resources     ───────────────►       ├── spec.resources (requests/limits)
+├── engine.storage       ───────────────►       ├── spec.storage (size, storageClass)
+├── engine.config        ───────────────►       ├── spec.postgresql.parameters
+├── engine.userSecret    ───────────────►       ├── spec.bootstrap.initdb.secret
+└── proxy.expose         ───────────────►       └── spec.managed.services.additional
+```
 
-1. Kill primary và chờ CNPG promote standby.
-2. Xác nhận hostname/LB IP không đổi.
-3. Xác nhận endpoint chuyển tới primary mới.
-4. Xác nhận write mới thành công sau reconnect.
-5. Không dùng `-ro` trong status hoặc test client.
+#### 2. Danh mục công việc & Files liên quan:
+- [`internal/controller/everest/providers/cnpg/provider.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/providers/cnpg/provider.go):
+  - Struct `Provider` nhúng `*unstructured.Unstructured` để thao tác dynamic với CNPG.
+  - Hàm `New()`: Khởi tạo instance và resolve image URL PostgreSQL.
+- [`internal/controller/everest/providers/cnpg/applier.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/providers/cnpg/applier.go):
+  - `Engine()`: Ánh xạ cấu hình phần cứng, storage, initdb secret và parse chuỗi cấu hình `postgresql.conf`.
+  - `Proxy()`: Cấu hình Service RW (LoadBalancer/NodePort) trong `spec.managed.services.additional`.
 
-## Phase 4 — Backup, ScheduledBackup và restore
+#### 3. Tiêu chí nghiệm thu:
+- Khởi tạo cụm CNPG 3 node với đầy đủ tài nguyên CPU, RAM, StorageClass và tham số `postgresql.conf`.
+- Endpoint kết nối được mở đúng kiểu mạng (`ClusterIP` hoặc `LoadBalancer`).
 
-Trạng thái: **đã implement lõi ở mức code, chờ E2E với CNPG/Barman object store**.
+---
 
-- `DatabaseClusterBackup` CNPG → `Backup.postgresql.cnpg.io`.
-- Backup schedules → `ScheduledBackup.postgresql.cnpg.io`.
-- Map `BackupStorage` sang Barman object store/plugin configuration.
-- Map pending/running/completed/failed và completion time về Everest status.
-- Full restore bằng `Cluster.spec.bootstrap.recovery`; hỗ trợ recovery target theo thời gian sau khi full restore ổn định.
-- Restore CNPG chỉ dùng khi bootstrap cluster mới; không tự động xóa/recreate cluster đang chạy để giả lập restore in-place.
-- Tách dispatch theo provider để CNPG không tạo Percona backup/restore.
+### Phase 3 — Status Mapping, Ownership & Zero-Downtime Failover
+* **Trạng thái:** ✅ **CODE ĐÃ XONG (100%)** — ⚠️ *Chờ E2E Test Lab*
 
-## Phase 5 — Database lifecycle và scheduling
+#### 1. Kiến trúc kỹ thuật:
+- **Status Loop:** Adapter theo dõi các Condition của CNPG. Khi condition `Ready == True` và số `readyInstances == desired` $\rightarrow$ Everest chuyển trạng thái sang `AppStateReady`.
+- **Ownership:** Thiết lập `OwnerReference` từ `DatabaseCluster` sang CNPG `Cluster` để Kubernetes Garbage Collection tự dọn dẹp khi xóa cụm.
+- **Failover Contract:** Everest chỉ công bố 1 endpoint duy nhất trỏ vào Service Read-Write (`<cluster>-rw.<ns>.svc`). Khi node Primary gặp sự cố, CNPG tự động chuyển backend của Service sang Primary mới mà không làm thay đổi DNS/Hostname của Everest.
 
-- Declarative database/user management bằng CNPG `Database` khi phù hợp.
-- Scale instances, anti-affinity và topology.
-- PVC expansion và trạng thái resize.
-- PostgreSQL minor image update và rollback guard.
-- PodSchedulingPolicy → CNPG affinity/tolerations/topology.
-- Quy định rõ các bootstrap field immutable.
+```text
+[Ứng dụng kết nối] ──► Hostname cố định: <cluster>-rw.<ns>.svc
+                                │
+          ┌─────────────────────┴─────────────────────┐
+          │ Khi failover: Service tự đổi Pod backend  │
+          ▼                                           ▼
+  [ Node 1: Primary (Lỗi) ]                   [ Node 2: Primary Mới ]
+```
 
-Không bao gồm CNPG `Pooler`, HAProxy hoặc read/write splitting.
+#### 2. Danh mục công việc & Files liên quan:
+- [`internal/controller/everest/providers/cnpg/provider.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/providers/cnpg/provider.go):
+  - `Status()`: Chuẩn hóa port (5432), hostname, size, ready và parse chi tiết conditions.
+  - `Cleanup()`: Dọn dẹp an toàn các bản backup/restore trước khi gỡ finalizer.
+- [`internal/controller/everest/databasecluster_controller.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/databasecluster_controller.go):
+  - Bắt sự kiện cập nhật trạng thái từ CNPG Cluster để trigger reconcile ngay lập tức.
 
-## Phase 6 — Webhook và capability model
+#### 3. Tiêu chí nghiệm thu:
+- Kill Pod Primary $\rightarrow$ CNPG bầu chọn Standby lên làm Primary mới.
+- Hostname/IP LoadBalancer không thay đổi.
+- Ứng dụng tự reconnect và ghi dữ liệu mới thành công sau failover.
 
-- Validate provider chỉ áp dụng cho PostgreSQL và không thể thay đổi.
-- Validate CNPG CRD/operator tồn tại khi chọn `cloudnative-pg`.
-- Validate image/version, replicas, storage và resources.
-- Với CNPG, reject proxy `type`, `replicas`, `config`, `storage`, `resources`; chỉ cho phép `proxy.expose`.
-- Reject PMM, pause hoặc import tới khi phase tương ứng hoàn tất; validate giới hạn backup/restore riêng của CNPG.
-- Restore/backup source và target phải cùng provider.
+---
 
-## Phase 7 — RBAC, packaging và installation
+### Phase 4 — Backup, ScheduledBackup & Phục hồi dữ liệu (Restore/PITR)
+* **Trạng thái:** ✅ **CODE ĐÃ XONG (100%)** — ⚠️ *Chờ E2E Test Lab*
 
-- Quyền CNPG liệt kê theo resource/verb, không dùng wildcard.
-- Everest khởi động bình thường nếu CNPG CRD chưa được cài.
-- CNPG operator được cài độc lập; Everest chỉ consume CRD/API.
-- Bundle, CSV, CRD và generated RBAC được regenerate cùng source markers.
-- Không xóa Percona scheme, RBAC, controller hoặc dependencies.
+#### 1. Kiến trúc kỹ thuật:
+- **Barman Object Store:** Chuyển đổi `BackupStorage` của Everest (S3/SeaweedFS/MinIO/Azure) thành cấu hình `spec.backup.barmanObjectStore` của CNPG.
+- **On-Demand & Scheduled Backup:** Ánh xạ `DatabaseClusterBackup` sang `Backup.postgresql.cnpg.io/v1` và `spec.backup.schedules` sang `ScheduledBackup.postgresql.cnpg.io/v1`.
+- **Restore & PITR (Blue-Green Restore):** Do `spec.bootstrap` của CNPG là bất biến, việc phục hồi được thực hiện bằng cách bootstrap một cụm DatabaseCluster mới từ `spec.dataSource`, kết nối vào Barman Object Store để tải Base Backup và replay WAL đến mốc `targetTime` (nếu dùng PITR).
 
-## Phase 8 — Monitoring và vận hành
+```text
+DatabaseClusterBackup (Everest)  ────────►  Backup (CNPG CRD)
+                                                 │
+                                                 ▼ Đẩy dữ liệu qua Barman
+                                            [ SeaweedFS S3 Bucket ]
+                                                 ▲ Kéo WAL / Snapshot
+                                                 │
+DatabaseCluster (Mới) DataSource ────────►  Cluster.spec.bootstrap.recovery
+```
 
-- Quan sát Cluster conditions, instance health, WAL/replication lag, PVC capacity và backup health.
-- Mapping `MonitoringConfig` theo capability CNPG; không giả lập PMM.
-- Alert failover, replica unhealthy, WAL archive failure, disk pressure và connection saturation.
-- Runbook reconnect storm, node/storage loss và operator outage.
+#### 2. Danh mục công việc & Files liên quan:
+- [`internal/controller/everest/databaseclusterbackup_controller.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/databaseclusterbackup_controller.go):
+  - `tryCreateCNPG()`: Bắt sự kiện backup từ CNPG ScheduledBackup để tự tạo `DatabaseClusterBackup`.
+  - `reconcileCNPG()`: Xóa an toàn 2 pha (xóa upstream CNPG Backup trước, gỡ finalizer sau).
+  - `getCNPGBackupStatus()`: Chuyển đổi trạng thái phase và timestamps RFC3339Nano.
+- [`internal/controller/everest/databaseclusterrestore_controller.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/databaseclusterrestore_controller.go):
+  - `restoreCNPG()`: Xác thực bootstrap từ `spec.dataSource`.
+  - `reconcileStatus()`: Chuyển trạng thái sang `RestoreSucceeded` khi cụm mới Ready.
+- [`internal/controller/everest/providers/cnpg/backup.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/providers/cnpg/backup.go):
+  - `BarmanObjectStore()`: Ánh xạ S3 credentials, endpointURL, bucket.
 
-## Phase 9 — E2E, migration gate và production acceptance
+#### 3. Tiêu chí nghiệm thu:
+- Tạo backup thủ công và chạy backup theo lịch cron đẩy thành công lên S3/SeaweedFS.
+- Dựng cụm mới từ bản backup hoặc Point-in-Time Recovery thành công, dữ liệu toàn vẹn.
 
-- Provision 1 và 3 instances qua Everest.
-- Scale, resize, image update và safe deletion.
-- Fail primary, giữ nguyên RW endpoint và write lại sau reconnect.
-- Backup/restore/PITR verification khi Phase 4 hoàn tất.
-- Không có endpoint RO trong DBaaS response hoặc application configuration.
-- `kubectl apply --dry-run=server`, `kubectl diff`, schema validation và full Go tests phải pass.
-- Rollback bằng image/bundle revision; không xóa namespace/PVC để rollback.
+---
 
-## Phase 10 — CNPG Publication/Subscription
+### Phase 5 — Database Lifecycle, Scheduling & Online PVC Expansion
+* **Trạng thái:** ✅ **CODE ĐÃ XONG (100%)** — ⚠️ *Chờ E2E Test Lab*
 
-Mục tiêu là quản lý logical replication qua Everest thay vì apply CNPG manifest thủ công.
+#### 1. Kiến trúc kỹ thuật:
+- **Scale ngang (Instances):** Thay đổi `engine.replicas` $\rightarrow$ CNPG tự động tạo Pod mới và clone dữ liệu qua `pg_basebackup` mà không gây downtime cho Primary.
+- **Online PVC Expansion:** Mở rộng dung lượng `storage.size` trực tiếp. CSI Driver mở rộng filesystem online. Bổ sung quan sát trạng thái **`AppStateResizingVolumes`** trong lúc đĩa đang resize.
+- **Pod Scheduling & Anti-Affinity:** Chuyển tiếp `PodSchedulingPolicy` của Everest thành `spec.affinity` của CNPG, cấu hình rải Pod giữa các Availability Zones (`topology.kubernetes.io/zone`).
+- **Minor Version Rolling Upgrade:** Nâng cấp minor image (ví dụ: `16.1` lên `16.4`), CNPG tự động thực hiện rolling update từng Standby trước rồi switchover Primary để giảm thiểu downtime tối đa (1–2 giây).
 
-API và controller:
+#### 2. Danh mục công việc & Files liên quan:
+- Cập nhật [`providers/cnpg/provider.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/providers/cnpg/provider.go):
+  - Kiểm tra condition và chênh lệch `PVC.spec.resources.requests.storage`/`PVC.status.capacity` theo nhãn `cnpg.io/cluster`.
+  - Cập nhật `status.status = everestv1alpha1.AppStateResizingVolumes`, ghi nhận lỗi resize và tự trở lại `ready` khi hoàn tất.
+- Cập nhật [`providers/cnpg/applier.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/providers/cnpg/applier.go):
+  - Chuyển tiếp `NodeAffinity`, `PodAffinity` và `PodAntiAffinity` sang đúng schema `spec.affinity` của CNPG.
+  - Chặn thu nhỏ PVC, kiểm tra khả năng volume expansion của StorageClass trước khi cập nhật.
+  - Chỉ cho phép rolling update cùng PostgreSQL major version và chặn downgrade.
 
-- Bổ sung Everest resource/API riêng cho Publication và Subscription; không nhồi logical replication vào `DatabaseCluster.spec.proxy`.
-- Map sang `Publication.postgresql.cnpg.io/v1` và `Subscription.postgresql.cnpg.io/v1`.
-- Thêm GVK/scheme hoặc unstructured type, watcher và RBAC tối thiểu cho `publications`, `subscriptions` và finalizers cần thiết.
-- Owner reference và deletion policy phải tránh xóa publication/slot ngoài ý muốn.
-- Map conditions, applied state, message và replication health về Everest status.
+#### 3. Tiêu chí nghiệm thu:
+- Tăng số node từ 3 lên 5: Cụm scale thành công, không downtime.
+- Tăng ổ đĩa từ 10Gi lên 20Gi: Everest hiển thị `resizingVolumes`, sau đó trở lại `ready` mà không restart DB.
+- Pods được phân bổ đều trên các Node/Zone khác nhau theo policy.
 
-Validation và an toàn dữ liệu:
+---
 
-- Source/target database, publication, external cluster và credential Secret phải tồn tại.
-- Secret chỉ được reference, không copy credential vào status/log.
-- DDL không được logical replication tự đồng bộ; migration workflow có schema gate riêng.
-- Đồng bộ sequence trước cutover.
-- Kiểm tra replication lag và subscription errors trước khi đổi endpoint.
-- Với PostgreSQL 16 trở xuống, kiểm thử logical slot survival qua HA failover.
-- Cutover chỉ chuyển application sang endpoint RW của target CNPG Cluster; không dùng endpoint replica.
+### Phase 6 — Validating Webhook & Capability Guard
+* **Trạng thái:** ✅ **CODE ĐÃ XONG (100%)** — ⚠️ *Chờ E2E Admission Test Lab*
 
-Acceptance Phase 10:
+#### 1. Kiến trúc kỹ thuật:
+Sử dụng Kubernetes Validating Admission Webhook để chặn các cấu hình không hợp lệ ngay tại thời điểm `kubectl apply`, bảo vệ hệ thống khỏi lỗi runtime.
 
-1. Everest tạo/xóa Publication và Subscription đúng provider.
-2. Initial copy và DML replication thành công.
-3. DDL gap được phát hiện và báo rõ.
-4. Sequence sync hoàn tất trước cutover.
-5. Fail primary target trong lúc replicate và xác nhận subscription recovery.
-6. Cutover sang cùng một RW endpoint, không bổ sung read routing.
+```text
+[kubectl apply] ──► [K8s API Server] ──► [Validating Webhook]
+                                                │
+                                                ├─ Hợp lệ ────► Ghi vào etcd
+                                                └─ Không hợp lệ ► Reject ngay lập tức (HTTP 422)
+```
 
-## Definition of Done tổng thể
+#### 2. Danh mục công việc:
+- ✅ Chặn thay đổi `spec.engine.provider` sau khi tạo (Immutable check).
+- ✅ Chặn toàn bộ cấu hình Everest-managed proxy khi dùng CNPG; chỉ cho phép `proxy.expose`.
+- ✅ Kiểm tra CRD `clusters.postgresql.cnpg.io` trước khi cho phép tạo cluster dạng `cloudnative-pg`.
+- ✅ Chặn các tính năng chưa hỗ trợ với thông báo theo đúng field: PMM Monitoring, Data Import, Engine Features, Pause và Everest CR version.
+- ✅ Bỏ phụ thuộc `DatabaseEngine` của Percona trong defaulter/validator khi provider là CNPG; yêu cầu khai báo PostgreSQL version tường minh.
+- ✅ Kiểm tra version update ngay tại admission: cho phép minor upgrade cùng major, chặn downgrade và major upgrade.
 
-- Percona PostgreSQL cũ không đổi hành vi khi provider rỗng.
-- CNPG là opt-in và không tạo Percona PostgreSQL CR.
-- Everest provision, observe và delete CNPG Cluster an toàn.
-- Một endpoint RW ổn định qua failover nội cluster; client reconnect thành công.
-- Không triển khai proxy/Pooler hoặc expose read-replica endpoint trong scope này.
-- Backup/restore/PITR và Pub/Sub chỉ bật sau khi phase tương ứng pass E2E.
-- Generated CRD/RBAC/bundle nhất quán và full test suite pass.
+#### 3. Tiêu chí nghiệm thu:
+- Sửa provider trên cluster đang chạy $\rightarrow$ Bị Webhook từ chối ngay lập tức.
+- Cấu hình proxy phức tạp với CNPG $\rightarrow$ Báo lỗi rõ ràng hướng dẫn chỉ dùng `proxy.expose`.
+
+---
+
+### Phase 7 — Phân quyền RBAC & Đóng gói OLM Bundle
+* **Trạng thái:** ✅ **CODE & BUNDLE ĐÃ XONG (100%)** — ⚠️ *Chờ E2E Test Lab*
+
+#### 1. Kiến trúc kỹ thuật:
+Cập nhật ClusterRole của Everest Operator tuân thủ nguyên tắc đặc quyền tối thiểu (Principle of Least Privilege), chỉ cấp quyền trên đúng API group `postgresql.cnpg.io`. Đóng gói Operator Lifecycle Manager (OLM) CSV/Bundle.
+
+#### 2. Danh mục công việc:
+- ✅ [`config/rbac/role.yaml`](file:///home/ngtukien/Projects/DBaaS/operator/config/rbac/role.yaml): Cấp quyền tường minh `get, list, watch, create, update, patch, delete` cho đúng ba resource CNPG `clusters`, `backups`, `scheduledbackups`; không dùng wildcard.
+- ✅ Đồng bộ quyền CNPG vào OLM ClusterServiceVersion (CSV), bundle manifests và `deploy/bundle.yaml`.
+- ✅ Đóng gói operator version `1.16.2`, khai báo Kubernetes version tối thiểu `1.30.0` và loại bỏ metadata icon rỗng không hợp lệ.
+- ✅ Kiểm tra bundle bằng Operator SDK standard validation và optional Operator Framework suite.
+
+#### 3. Tiêu chí nghiệm thu:
+- Everest Operator chạy bình thường với ServiceAccount mặc định, không gặp lỗi `403 Forbidden` khi thao tác tài nguyên CNPG.
+
+---
+
+### Phase 8 — Giám sát & Vận hành (Observability)
+* **Trạng thái:** 🟡 **CODE MỘT PHẦN** — PodMonitor tự động + alert rule cốt lõi đã xong; alert backup-failure và Grafana dashboard còn KẾ HOẠCH; chưa E2E trên cluster thật (lab chưa cài Prometheus Operator).
+
+#### 1. Kiến trúc kỹ thuật:
+Tận dụng Metrics Exporter tích hợp sẵn của CloudNativePG (cổng 9187 trên từng Pod) để xuất metric Prometheus chuẩn (`cnpg_collector_*`), tích hợp vào hệ thống giám sát của Everest/Grafana.
+
+CNPG provider dùng lại đúng pattern Dynamic Discovery của Phase 1 (kiểm tra CRD
+`clusters.postgresql.cnpg.io`): trước khi set `spec.monitoring.enablePodMonitor`
+trên CNPG `Cluster`, `Engine()` kiểm tra CRD `podmonitors.monitoring.coreos.com`
+của Prometheus Operator có tồn tại hay không. Nếu chưa cài, field này bị bỏ qua
+an toàn — không set gì, không lỗi reconcile. Nhờ vậy tính năng này không phá vỡ
+lab hiện tại (chưa cài Prometheus Operator) và tự kích hoạt ngay khi Operator
+được cài sau này.
+
+```text
+[Engine()] ─── Kiểm tra API Server ───► Có CRD podmonitors.monitoring.coreos.com?
+                                              │
+                                              ├─ CÓ ──► spec.monitoring.enablePodMonitor = true
+                                              └─ KHÔNG ► Bỏ qua an toàn (không set field)
+```
+
+#### 2. Danh mục công việc & Files liên quan:
+- ✅ [`internal/consts/consts.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/consts/consts.go): hằng số `PodMonitorCRDName`.
+- ✅ [`internal/controller/everest/providers/cnpg/provider.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/providers/cnpg/provider.go): `podMonitorCRDInstalled()` — dynamic discovery, an toàn với client nil.
+- ✅ [`internal/controller/everest/providers/cnpg/applier.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/providers/cnpg/applier.go): `Engine()` set `spec.monitoring.enablePodMonitor` có điều kiện. Unit test: `TestApplierEngine` (CRD vắng mặt → không set), `TestApplierEngineEnablesPodMonitorWhenCRDInstalled` (CRD có mặt → set `true`).
+- ✅ [`demo/k8s/monitoring/00-cnpg-alerts.yaml`](file:///home/ngtukien/Projects/DBaaS/demo/k8s/monitoring/00-cnpg-alerts.yaml): `PrometheusRule` — instance down, instance count dưới desired (đo RTO failover), replication lag, replica failing replication, WAL archiving failure. Dùng đúng tên metric trong `alerts.yaml` chính thức của CloudNativePG.
+- 📋 Alert "backup thất bại" (ngoài WAL archiving): chưa viết — cần xác nhận tên metric mà `plugin-barman-cloud` (CNPG-I) thực sự export trên cluster thật, vì các metric `cnpg_collector_last_failed_backup_timestamp`/`last_available_backup_timestamp` đã deprecated cho đường native backup. Xem TODO trong `demo/k8s/monitoring/00-cnpg-alerts.yaml`.
+- 📋 Grafana dashboard: chưa có; `demo/k8s/monitoring/README.md` trỏ tới dashboard cộng đồng ID 20417 làm điểm khởi đầu.
+- 📋 Cài đặt Prometheus Operator/Grafana vào `infra/install-platform.sh`: chưa làm — là quyết định hạ tầng riêng, cần xác nhận trước khi thêm.
+
+#### 3. Tiêu chí nghiệm thu:
+- Dashboard Grafana hiển thị đầy đủ thông số sức khỏe và hiệu năng của cụm CNPG. **(chưa kiểm chứng — cần cluster + Prometheus Operator)**
+- CNPG Cluster tự sinh `PodMonitor` khi Prometheus Operator đã cài, không set gì khi chưa cài. **(có unit test, chưa E2E)**
+
+---
+
+### Phase 9 — Kiểm thử nghiệm thu tổng thể (End-to-End Acceptance)
+* **Trạng thái:** 📋 **KẾ HOẠCH**
+
+#### 1. Kịch bản kiểm thử:
+1. **Provisioning:** Dựng cụm 1 node và 3 node HA qua Everest manifest.
+2. **Scale & Resize:** Scale ngang replicas, mở rộng đĩa online.
+3. **Failover:** Kill node Primary, đo lường RTO (< 10s) và RPO (0s), xác nhận kết nối tự phục hồi.
+4. **Backup & PITR:** Chụp backup lên S3, xóa bảng dữ liệu, tua ngược thời gian khôi phục thành công.
+
+---
+
+### Phase 10 — CNPG Logical Replication (Publication & Subscription)
+* **Trạng thái:** 🟡 **CODE ĐÃ XONG (Publication/Subscription qua Everest)** — ⚠️ *Chờ E2E Test Lab*; đồng bộ Sequence trước cutover vẫn là quy trình thủ công (xem `demo/k8s/cnpg/README.md` §10), chưa tự động hoá.
+
+#### 1. Kiến trúc kỹ thuật:
+Phục vụ nhu cầu đồng bộ dữ liệu giữa các microservices hoặc giữa các cụm CSDL khác nhau mà không cần đồng bộ toàn bộ đĩa vật lý.
+
+```text
+[ Cụm CNPG Nguồn (A) ]                           [ Cụm CNPG Đích (B) ]
+ └── Publication.postgresql.cnpg.io  ──Logical──►  └── Subscription.postgresql.cnpg.io
+```
+
+Everest mở rộng `DatabaseClusterSpec` bằng `spec.replication.publications[]` và
+`spec.replication.subscriptions[]` — cùng cách tiếp cận declarative với
+`spec.backup` (không phải manifest CNPG thuần như `demo/k8s/cnpg/09-subscription.yaml`).
+Mỗi Subscription tự khai báo `source` (host/port/dbname/user/secret); applier tự
+sinh entry `spec.externalClusters` tương ứng (tên `"<subscription>-source"`) trên
+CNPG Cluster — người dùng không cần tự quản lý `externalClusters`. Publication/
+Subscription bị xoá khỏi spec sẽ bị prune khỏi cluster (không để lại object mồ côi),
+cùng triết lý với cách `Backup()` xoá `ScheduledBackup` khi `schedule.Enabled=false`.
+
+```text
+[Everest DatabaseCluster.spec.replication] ──Replication()──► Publication/Subscription CRD (CNPG)
+                                                  │
+                                                  └──► spec.externalClusters["<sub>-source"] (tự sinh, không đụng
+                                                       entry do DataSource() sinh cho restore/PITR)
+```
+
+#### 2. Danh mục công việc & Files liên quan:
+- ✅ [`api/everest/v1alpha1/databasecluster_types.go`](file:///home/ngtukien/Projects/DBaaS/operator/api/everest/v1alpha1/databasecluster_types.go): `Replication`, `ReplicationPublication`, `ReplicationSubscription`, `ReplicationSourceConnection`, `ReplicationTarget`; thêm `Replication() error` vào interface `Applier`.
+- ✅ [`internal/controller/everest/providers/cnpg/replication.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/providers/cnpg/replication.go): sinh/patch CRD `Publication`/`Subscription`, tự merge `spec.externalClusters`, prune object không còn khai báo.
+- ✅ `internal/controller/everest/providers/{pg,psmdb,pxc}/applier.go`: `Replication()` từ chối rõ ràng nếu người dùng khai báo `spec.replication` trên provider không phải CNPG.
+- ✅ [`internal/webhook/everest/v1alpha1/databasecluster_webhook.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/webhook/everest/v1alpha1/databasecluster_webhook.go): admission-time guard — chặn `spec.replication` ngay lúc `kubectl apply` nếu provider không phải `cloudnative-pg` (không đợi tới reconcile mới báo lỗi), cùng triết lý Phase 6.
+- ✅ Unit test: `replication_test.go` (tạo Publication/Subscription, tự sinh externalClusters, prune khi xoá khỏi spec), `databasecluster_webhook_test.go` (`TestDatabaseClusterValidator_ReplicationIsCNPGOnly`). `go build ./...`, `go vet ./...` và toàn bộ `go test` liên quan đều pass.
+- 📋 Đồng bộ Sequence trước cutover và kiểm soát schema DDL gap: chưa tự động hoá — vẫn theo runbook thủ công trong `demo/k8s/cnpg/README.md` §10 (cutover near-zero downtime).
+- 📋 CRD YAML/RBAC/webhook manifest: đã regenerate bằng `make generate && make manifests`, chưa apply lên cluster thật (đang chờ cluster ổn định).
+
+#### 3. Tiêu chí nghiệm thu:
+- Tạo `DatabaseCluster` với `spec.replication.publications`/`subscriptions` → sinh đúng CRD CNPG, dữ liệu đồng bộ liên tục qua logical replication. **(chưa kiểm chứng trên cluster thật)**
+- Xoá một publication/subscription khỏi spec → object CNPG tương ứng bị prune, không để sót. **(có unit test, chưa E2E)**
+- Khai báo `spec.replication` trên provider không phải CNPG → bị admission webhook từ chối ngay lập tức. **(có unit test)**
+
+---
+
+### Phase 11 — CNPG Replica Cluster (Cross-Zone / Cross-Cluster HA & DR qua pg_basebackup)
+* **Trạng thái:** 📋 **KẾ HOẠCH**
+
+#### 1. Kiến trúc kỹ thuật:
+Bảo vệ hệ thống ở cấp độ thảm họa trung tâm dữ liệu (Datacenter / Zone failure). Dựng một cụm bản sao (Replica Cluster) ở Zone B hoặc Kubernetes Cluster khác:
+
+```text
+[ ZONE A: PRIMARY CLUSTER ]                       [ ZONE B: REPLICA CLUSTER ]
+   cnpg-db-primary (RW)                             cnpg-db-replica (Standby Cluster)
+          │                                                │
+          ├─────── 1. Bootstrap: pg_basebackup ───────────►│ (Clone dữ liệu ban đầu)
+          │                                                │
+          └─────── 2. Continuous Physical Streaming ──────►│ (Replay WAL liên tục)
+                                                           │
+          [ Sự cố Zone A! ]                                │
+          ┌────────────────────────────────────────────────┘
+          ▼
+   3. Gạt cờ spec.replica.enabled: false
+      ──► Tự động Promote thành Primary mới nhận ghi!
+```
+
+#### 2. Danh mục công việc:
+- Mở rộng CRD `DatabaseCluster`: thêm cấu hình `spec.replica`.
+- Adapter `applier.go`: Render `spec.replica.enabled: true`, `spec.bootstrap.pg_basebackup.source` và `spec.externalClusters`.
+- Bổ sung đo lường byte lag (`pg_wal_lsn_diff`) giữa 2 cụm vào `DatabaseCluster.status`.
+
+#### 3. Tiêu chí nghiệm thu:
+- Cụm Zone B clone snapshot thành công qua `pg_basebackup` từ Zone A qua mạng.
+- Ghi dữ liệu ở Zone A xuất hiện tức thì ở Zone B.
+- Diễn tập thăng cấp (DR Promotion): Ngắt Zone A, promote cụm Zone B nhận ghi thành công trong vài giây.
+
+---
+
+## 🏁 ĐIỀU KIỆN HOÀN TẤT DỰ ÁN (DEFINITION OF DONE)
+
+1. **Bảo toàn tính nguyên bản:** Cụm Percona PostgreSQL cũ hoạt động bình thường, không thay đổi bất kỳ hành vi nào khi không chọn provider.
+2. **Provider độc lập:** CNPG hoạt động độc lập, không sinh nhầm tài nguyên của Percona.
+3. **Tính sẵn sàng cao:** Chịu lỗi failover tự động trong cụm (< 10s) và hỗ trợ Disaster Recovery liên Zone.
+4. **Vòng đời CSDL hoàn chỉnh:** Hỗ trợ đầy đủ Cấp phát, Mở rộng ổ đĩa online, Nâng cấp rolling, Sao lưu S3 và Phục hồi PITR.
+5. **Mã nguồn chuẩn mực:** 100% các đoạn code tùy biến được gắn comment rõ ràng `// [CUSTOM CNPG]`, pass toàn bộ unit tests và linter.

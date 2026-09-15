@@ -90,7 +90,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-07-02T18:40:20Z"
+    createdAt: "2026-09-15T05:25:26Z"
     operators.operatorframework.io/builder: operator-sdk-v1.40.0
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
   name: everest-operator.v0.0.0
@@ -161,9 +161,6 @@ spec:
       version: v1alpha1
   description: Deploy database clusters easily with Everest operator
   displayName: Everest operator
-  icon:
-  - base64data: ""
-    mediatype: ""
   install:
     spec:
       clusterPermissions:
@@ -595,6 +592,7 @@ spec:
   - email: michal.kralik@percona.com
     name: michal-kralik
   maturity: alpha
+  minKubeVersion: 1.30.0
   provider:
     name: Percona
     url: https://percona.com

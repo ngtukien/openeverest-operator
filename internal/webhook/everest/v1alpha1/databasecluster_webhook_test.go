@@ -219,10 +219,11 @@ func TestDatabaseClusterValidator_ValidateCreate(t *testing.T) { //nolint:mainti
 				db.Spec.Engine.UserSecretsName = dbcTestUserSecretName
 			},
 			wantError: apierrors.NewInvalid(dbClusterGroupKind, dbcTestDbName, field.ErrorList{
-				errInvalidField(dbcUserSecretsNamePath, dbcTestUserSecretName, apierrors.NewNotFound(apiSchema.GroupResource{
-					Group:    corev1.SchemeGroupVersion.Group,
-					Resource: "secrets",
-				},
+				errInvalidField(dbcUserSecretsNamePath, dbcTestUserSecretName, apierrors.NewNotFound(
+					apiSchema.GroupResource{
+						Group:    corev1.SchemeGroupVersion.Group,
+						Resource: "secrets",
+					},
 					dbcTestUserSecretName,
 				).Error()),
 			}),
@@ -248,10 +249,11 @@ func TestDatabaseClusterValidator_ValidateCreate(t *testing.T) { //nolint:mainti
 				}
 			},
 			wantError: apierrors.NewInvalid(dbClusterGroupKind, dbcTestDbName, field.ErrorList{
-				errInvalidField(dbcDataImportPath, "importer", apierrors.NewNotFound(apiSchema.GroupResource{
-					Group:    everestv1alpha1.GroupVersion.Group,
-					Resource: "dataimporters",
-				},
+				errInvalidField(dbcDataImportPath, "importer", apierrors.NewNotFound(
+					apiSchema.GroupResource{
+						Group:    everestv1alpha1.GroupVersion.Group,
+						Resource: "dataimporters",
+					},
 					"importer",
 				).Error()),
 			}),
@@ -317,10 +319,11 @@ func TestDatabaseClusterValidator_ValidateCreate(t *testing.T) { //nolint:mainti
 				db.Spec.Engine.Type = everestv1alpha1.DatabaseEnginePSMDB
 			},
 			wantError: apierrors.NewInvalid(dbClusterGroupKind, dbcTestDbName, field.ErrorList{
-				errInvalidField(dbcProxyExposeLbcPath, "lbc-test", apierrors.NewNotFound(apiSchema.GroupResource{
-					Group:    everestv1alpha1.GroupVersion.Group,
-					Resource: "loadbalancerconfigs",
-				},
+				errInvalidField(dbcProxyExposeLbcPath, "lbc-test", apierrors.NewNotFound(
+					apiSchema.GroupResource{
+						Group:    everestv1alpha1.GroupVersion.Group,
+						Resource: "loadbalancerconfigs",
+					},
 					"lbc-test",
 				).Error()),
 			}),
@@ -388,10 +391,11 @@ func TestDatabaseClusterValidator_ValidateCreate(t *testing.T) { //nolint:mainti
 				db.Spec.Engine.Type = everestv1alpha1.DatabaseEnginePSMDB
 			},
 			wantError: apierrors.NewInvalid(dbClusterGroupKind, dbcTestDbName, field.ErrorList{
-				errInvalidField(dbcPsmdbShdcEngineFeaturePath, "shdc-test", apierrors.NewNotFound(apiSchema.GroupResource{
-					Group:    enginefeatureseverestv1alpha1.GroupVersion.Group,
-					Resource: "splithorizondnsconfigs",
-				},
+				errInvalidField(dbcPsmdbShdcEngineFeaturePath, "shdc-test", apierrors.NewNotFound(
+					apiSchema.GroupResource{
+						Group:    enginefeatureseverestv1alpha1.GroupVersion.Group,
+						Resource: "splithorizondnsconfigs",
+					},
 					"shdc-test",
 				).Error()),
 			}),
@@ -754,4 +758,165 @@ func TestDatabaseClusterValidator_ValidateUpdate(t *testing.T) {
 			assert.Equal(t, tc.wantErr.Error(), err.Error())
 		})
 	}
+}
+
+func TestDatabaseClusterValidator_CNPGCreateCapabilityGuards(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
+	utilruntime.Must(everestv1alpha1.AddToScheme(scheme))
+	crd := &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: consts.CNPGClusterCRDName}}
+
+	newDB := func() *everestv1alpha1.DatabaseCluster {
+		return &everestv1alpha1.DatabaseCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: dbcTestDbName, Namespace: dbcTestDbNamespace},
+			Spec: everestv1alpha1.DatabaseClusterSpec{Engine: everestv1alpha1.Engine{
+				Type: everestv1alpha1.DatabaseEnginePostgresql, Provider: everestv1alpha1.DatabaseEngineProviderCloudNativePG,
+				Version: "16.4",
+			}},
+		}
+	}
+
+	tests := []struct {
+		name      string
+		withCRD   bool
+		modify    func(*everestv1alpha1.DatabaseCluster)
+		wantError string
+	}{
+		{name: "valid", withCRD: true},
+		{name: "CNPG CRD missing", wantError: "is not installed"},
+		{
+			name: "Everest proxy configuration is unsupported", withCRD: true,
+			modify: func(db *everestv1alpha1.DatabaseCluster) {
+				db.Spec.Proxy.Type = everestv1alpha1.ProxyTypePGBouncer
+			},
+			wantError: "configure only spec.proxy.expose",
+		},
+		{
+			name: "PMM monitoring is unsupported", withCRD: true,
+			modify: func(db *everestv1alpha1.DatabaseCluster) {
+				db.Spec.Monitoring = &everestv1alpha1.Monitoring{MonitoringConfigName: "pmm"}
+			},
+			wantError: "PMM monitoring is not yet supported",
+		},
+		{
+			name: "data import is unsupported", withCRD: true,
+			modify: func(db *everestv1alpha1.DatabaseCluster) {
+				db.Spec.DataSource = &everestv1alpha1.DataSource{DataImport: &everestv1alpha1.DataImportJobTemplate{}}
+			},
+			wantError: "data import is not yet supported",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			objects := []ctrlclient.Object{}
+			if tc.withCRD {
+				objects = append(objects, crd.DeepCopy())
+			}
+			client := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+			db := newDB()
+			if tc.modify != nil {
+				tc.modify(db)
+			}
+			_, err := (&DatabaseClusterValidator{Client: client}).ValidateCreate(t.Context(), db)
+			if tc.wantError == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantError)
+		})
+	}
+}
+
+func TestDatabaseClusterValidator_CNPGUpdateGuards(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(everestv1alpha1.AddToScheme(scheme))
+	client := fakeclient.NewClientBuilder().WithScheme(scheme).Build()
+	validator := &DatabaseClusterValidator{Client: client}
+
+	newDB := func(version string) *everestv1alpha1.DatabaseCluster {
+		return &everestv1alpha1.DatabaseCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: dbcTestDbName, Namespace: dbcTestDbNamespace},
+			Spec: everestv1alpha1.DatabaseClusterSpec{Engine: everestv1alpha1.Engine{
+				Type: everestv1alpha1.DatabaseEnginePostgresql, Provider: everestv1alpha1.DatabaseEngineProviderCloudNativePG,
+				Version: version,
+			}},
+		}
+	}
+
+	t.Run("minor upgrade is allowed", func(t *testing.T) {
+		t.Parallel()
+		_, err := validator.ValidateUpdate(t.Context(), newDB("16.3"), newDB("16.4"))
+		require.NoError(t, err)
+	})
+	t.Run("major update is rejected", func(t *testing.T) {
+		t.Parallel()
+		_, err := validator.ValidateUpdate(t.Context(), newDB("16.4"), newDB("17.1"))
+		require.ErrorContains(t, err, "only minor version changes")
+	})
+	t.Run("downgrade is rejected", func(t *testing.T) {
+		t.Parallel()
+		_, err := validator.ValidateUpdate(t.Context(), newDB("16.4"), newDB("16.3"))
+		require.ErrorContains(t, err, "downgrade is not supported")
+	})
+	t.Run("provider is immutable", func(t *testing.T) {
+		t.Parallel()
+		oldDB := newDB("16.4")
+		newDB := oldDB.DeepCopy()
+		newDB.Spec.Engine.Provider = everestv1alpha1.DatabaseEngineProviderPerconaPostgresql
+		_, err := validator.ValidateUpdate(t.Context(), oldDB, newDB)
+		require.ErrorContains(t, err, "spec.engine.provider: Forbidden: is immutable")
+	})
+}
+
+// [CUSTOM CNPG] Replication (Publication/Subscription) is a CloudNativePG-only capability;
+// see PLAN.md Phase 10.
+func TestDatabaseClusterValidator_ReplicationIsCNPGOnly(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(everestv1alpha1.AddToScheme(scheme))
+	client := fakeclient.NewClientBuilder().WithScheme(scheme).Build()
+	validator := &DatabaseClusterValidator{Client: client}
+
+	replication := &everestv1alpha1.Replication{
+		Subscriptions: []everestv1alpha1.ReplicationSubscription{{
+			Name: "sub", DBName: "app", PublicationName: "pub",
+			Source: everestv1alpha1.ReplicationSourceConnection{
+				Host: "legacy.example.svc", DBName: "app", User: "replicator", PasswordSecretName: "creds",
+			},
+		}},
+	}
+
+	t.Run("rejected for the default (Percona PostgreSQL) provider", func(t *testing.T) {
+		t.Parallel()
+		db := &everestv1alpha1.DatabaseCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: dbcTestDbName, Namespace: dbcTestDbNamespace},
+			Spec: everestv1alpha1.DatabaseClusterSpec{
+				Engine:      everestv1alpha1.Engine{Type: everestv1alpha1.DatabaseEnginePostgresql, Version: "16.4"},
+				Replication: replication,
+			},
+		}
+		_, err := validator.ValidateCreate(t.Context(), db)
+		require.ErrorContains(t, err, "replication is only supported by the CloudNativePG provider")
+	})
+
+	t.Run("rejected on update for the default (Percona PostgreSQL) provider", func(t *testing.T) {
+		t.Parallel()
+		oldDB := &everestv1alpha1.DatabaseCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: dbcTestDbName, Namespace: dbcTestDbNamespace},
+			Spec: everestv1alpha1.DatabaseClusterSpec{
+				Engine: everestv1alpha1.Engine{Type: everestv1alpha1.DatabaseEnginePostgresql, Version: "16.4"},
+			},
+		}
+		newDB := oldDB.DeepCopy()
+		newDB.Spec.Replication = replication
+		_, err := validator.ValidateUpdate(t.Context(), oldDB, newDB)
+		require.ErrorContains(t, err, "replication is only supported by the CloudNativePG provider")
+	})
 }

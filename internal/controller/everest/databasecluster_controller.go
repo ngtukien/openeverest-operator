@@ -135,6 +135,9 @@ func (r *DatabaseClusterReconciler) newDBProvider(
 	case everestv1alpha1.DatabaseEnginePXC:
 		return pxc.New(ctx, opts)
 	case everestv1alpha1.DatabaseEnginePostgresql:
+		// [CUSTOM CNPG] Phân luồng xử lý theo Provider của PostgreSQL:
+		// - Nếu là Percona: khởi tạo provider pg.New(ctx, opts)
+		// - Nếu là CloudNativePG: khởi tạo provider cnpg.New(ctx, opts)
 		switch database.Spec.Engine.EffectiveProvider() {
 		case everestv1alpha1.DatabaseEngineProviderPerconaPostgresql:
 			return pg.New(ctx, opts)
@@ -245,6 +248,15 @@ func (r *DatabaseClusterReconciler) reconcileDB(
 			if err := applier.DataImport(); err != nil {
 				return fmt.Errorf("failed to apply data import: %w", err)
 			}
+		}
+		// [CUSTOM CNPG] ReplicaCluster runs after DataSource: both write spec.bootstrap and
+		// spec.externalClusters on the upstream CNPG Cluster, and the replica-cluster bootstrap
+		// has to be the one that survives. See PLAN.md Phase 11.
+		if err := applier.ReplicaCluster(); err != nil {
+			return fmt.Errorf("failed to apply replica cluster: %w", err)
+		}
+		if err := applier.Replication(); err != nil {
+			return fmt.Errorf("failed to apply replication: %w", err)
 		}
 		return nil
 	}); err != nil {
@@ -1107,9 +1119,14 @@ func (r *DatabaseClusterReconciler) ReconcileWatchers(ctx context.Context) error
 			}
 		case everestv1alpha1.DatabaseEnginePostgresql:
 			objects := []client.Object{&pgv2.PerconaPGCluster{}}
+			// [CUSTOM CNPG] Kiểm tra động (dynamic discovery) CRD "clusters.postgresql.cnpg.io":
+			// Nếu CRD này tồn tại trên cụm K8s, đăng ký theo dõi (watch) các đối tượng CNPG Cluster.
+			// Nhờ đó, khi trạng thái cụm CNPG thay đổi (Ready, Failover, IP mới), Everest sẽ lập tức
+			// nhận event và cập nhật DatabaseCluster status tương ứng.
+			// Nếu không tìm thấy CRD (IsNotFound), bỏ qua để không gây lỗi khởi động controller.
 			crd := &unstructured.Unstructured{Object: map[string]any{}}
 			crd.SetGroupVersionKind(schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"})
-			if err := r.Get(ctx, types.NamespacedName{Name: "clusters.postgresql.cnpg.io"}, crd); err == nil {
+			if err := r.Get(ctx, types.NamespacedName{Name: consts.CNPGClusterCRDName}, crd); err == nil {
 				cluster := &unstructured.Unstructured{Object: map[string]any{}}
 				cluster.SetGroupVersionKind(schema.GroupVersionKind{Group: consts.CNPGAPIGroup, Version: "v1", Kind: consts.CNPGClusterKind})
 				objects = append(objects, cluster)

@@ -1,6 +1,17 @@
 // everest-operator
 // Copyright (C) 2022 Percona LLC
-// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package cnpg
 
@@ -10,7 +21,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Masterminds/semver/v3"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -31,7 +44,9 @@ func (a *applier) ResetDefaults() error {
 	if a.Object == nil {
 		a.Object = map[string]any{}
 	}
-	a.Object["spec"] = map[string]any{}
+	if _, ok := a.Object["spec"]; !ok {
+		a.Object["spec"] = map[string]any{}
+	}
 	return nil
 }
 
@@ -52,6 +67,13 @@ func (a *applier) Metadata() error {
 	return controllerutil.SetControllerReference(a.DB, a.Unstructured, a.C.Scheme())
 }
 
+// [CUSTOM CNPG] Engine: Chuyển đổi toàn bộ cấu hình engine từ Everest sang CNPG Cluster spec:
+// - instances: số lượng node PostgreSQL (engine.Replicas)
+// - imageName: image của PostgreSQL (ghcr.io/cloudnative-pg/postgresql:<version>)
+// - storage: dung lượng và StorageClass
+// - resources: requests và limits CPU/RAM
+// - bootstrap.initdb: secret chứa thông tin mật khẩu ban đầu
+// - postgresql.parameters: các tham số cấu hình custom trong engine.Config.
 func (a *applier) Engine() error {
 	if a.pausedErr != nil {
 		return a.pausedErr
@@ -65,6 +87,17 @@ func (a *applier) Engine() error {
 	}
 	if engine.Replicas < 1 {
 		return errors.New("CloudNativePG requires at least one PostgreSQL instance")
+	}
+	currentImage, _, err := unstructured.NestedString(a.Object, "spec", "imageName")
+	if err != nil {
+		return fmt.Errorf("read current CloudNativePG image: %w", err)
+	}
+	if err := validateVersionChange(currentImage, engine.Version); err != nil {
+		return err
+	}
+	currentSize, err := a.currentStorageSize()
+	if err != nil {
+		return err
 	}
 
 	resourceRequirements := engine.Resources.ToResourceRequirements()
@@ -85,7 +118,30 @@ func (a *applier) Engine() error {
 		"resources": resources,
 	}
 	if engine.Storage.Class != nil {
-		spec["storage"].(map[string]any)["storageClass"] = *engine.Storage.Class
+		if storage, ok := spec["storage"].(map[string]any); ok {
+			storage["storageClass"] = *engine.Storage.Class
+		}
+	}
+	setStorageSize := func(size resource.Quantity, storageClass *string) {
+		storage, ok := spec["storage"].(map[string]any)
+		if !ok {
+			return
+		}
+		storage["size"] = size.String()
+		if storageClass != nil {
+			storage["storageClass"] = *storageClass
+		}
+	}
+	if err := common.ConfigureStorage(
+		a.ctx,
+		a.C,
+		a.DB,
+		currentSize,
+		engine.Storage.Size,
+		engine.Storage.Class,
+		setStorageSize,
+	); err != nil {
+		return fmt.Errorf("configure CloudNativePG storage: %w", err)
 	}
 	if engine.UserSecretsName != "" {
 		spec["bootstrap"] = map[string]any{
@@ -99,6 +155,9 @@ func (a *applier) Engine() error {
 	if parameters := parsePostgreSQLParameters(engine.Config); len(parameters) != 0 {
 		spec["postgresql"] = map[string]any{"parameters": parameters}
 	}
+	if err := a.configureMonitoring(spec); err != nil {
+		return err
+	}
 	a.Object["spec"] = spec
 	return nil
 }
@@ -110,6 +169,11 @@ func (a *applier) EngineFeatures() error {
 	return nil
 }
 
+// [CUSTOM CNPG] Proxy: Xử lý Service Exposure cho CNPG:
+//   - CNPG không dùng proxy ngoài do Everest quản lý; nó có sẵn Service native.
+//   - Nếu người dùng cấu hình proxy.expose dạng LoadBalancer/NodePort, Everest sẽ khai báo
+//     vào "spec.managed.services.additional" để CNPG tự sinh Service "<cluster>-rw-external"
+//     trỏ trực tiếp vào Primary pod hiện tại.
 func (a *applier) Proxy() error {
 	proxy := a.DB.Spec.Proxy
 	proxyResources := proxy.Resources.ToResourceRequirements()
@@ -174,13 +238,72 @@ func (a *applier) PodSchedulingPolicy() error {
 		policy.Spec.AffinityConfig.PostgreSQL.Engine == nil {
 		return nil
 	}
-	affinity, err := runtime.DefaultUnstructuredConverter.ToUnstructured(policy.Spec.AffinityConfig.PostgreSQL.Engine)
-	if err != nil {
-		return fmt.Errorf("convert PostgreSQL affinity: %w", err)
+	engineAffinity := policy.Spec.AffinityConfig.PostgreSQL.Engine
+	cnpgAffinity := map[string]any{}
+	if engineAffinity.NodeAffinity != nil {
+		nodeAffinity, err := runtime.DefaultUnstructuredConverter.ToUnstructured(engineAffinity.NodeAffinity)
+		if err != nil {
+			return fmt.Errorf("convert PostgreSQL node affinity: %w", err)
+		}
+		cnpgAffinity["nodeAffinity"] = nodeAffinity
 	}
-	return unstructured.SetNestedMap(a.Object, affinity, "spec", "affinity")
+	if engineAffinity.PodAffinity != nil {
+		podAffinity, err := runtime.DefaultUnstructuredConverter.ToUnstructured(engineAffinity.PodAffinity)
+		if err != nil {
+			return fmt.Errorf("convert PostgreSQL pod affinity: %w", err)
+		}
+		cnpgAffinity["additionalPodAffinity"] = podAffinity
+	}
+	if engineAffinity.PodAntiAffinity != nil {
+		podAntiAffinity, err := runtime.DefaultUnstructuredConverter.ToUnstructured(engineAffinity.PodAntiAffinity)
+		if err != nil {
+			return fmt.Errorf("convert PostgreSQL pod anti-affinity: %w", err)
+		}
+		cnpgAffinity["additionalPodAntiAffinity"] = podAntiAffinity
+	}
+	if len(cnpgAffinity) == 0 {
+		return nil
+	}
+	return unstructured.SetNestedMap(a.Object, cnpgAffinity, "spec", "affinity")
 }
 
+func validateVersionChange(currentImage, desiredVersion string) error {
+	desired, err := semver.NewVersion(desiredVersion)
+	if err != nil {
+		return fmt.Errorf("invalid CloudNativePG PostgreSQL version %q: %w", desiredVersion, err)
+	}
+	if currentImage == "" {
+		return nil
+	}
+
+	lastSlash := strings.LastIndex(currentImage, "/")
+	lastColon := strings.LastIndex(currentImage, ":")
+	if lastColon <= lastSlash {
+		return fmt.Errorf("cannot determine PostgreSQL version from current CloudNativePG image %q", currentImage)
+	}
+	currentVersion, _, _ := strings.Cut(currentImage[lastColon+1:], "@")
+	current, err := semver.NewVersion(currentVersion)
+	if err != nil {
+		return fmt.Errorf("cannot determine PostgreSQL version from current CloudNativePG image %q: %w", currentImage, err)
+	}
+	if desired.Major() != current.Major() {
+		return fmt.Errorf(
+			"CloudNativePG rolling updates only support PostgreSQL minor versions: current=%s desired=%s",
+			currentVersion,
+			desiredVersion,
+		)
+	}
+	if desired.LessThan(current) {
+		return fmt.Errorf("CloudNativePG PostgreSQL version downgrade is not supported: current=%s desired=%s", currentVersion, desiredVersion)
+	}
+	return nil
+}
+
+// [CUSTOM CNPG] Backup: Đồng bộ cấu hình sao lưu cho CNPG Cluster:
+//  1. Tìm BackupStorage được chỉ định và ánh xạ vào "spec.backup.barmanObjectStore" của CNPG.
+//  2. Kiểm tra ràng buộc: CNPG chỉ hỗ trợ 1 đích lưu trữ S3 duy nhất cho toàn cụm.
+//  3. Với mỗi lịch trong spec.backup.schedules: tự động sinh ra hoặc xóa tài nguyên
+//     ScheduledBackup ("postgresql.cnpg.io/v1") tương ứng trên K8s.
 func (a *applier) Backup() error {
 	storageNames := map[string]struct{}{}
 	for _, schedule := range a.DB.Spec.Backup.Schedules {
@@ -245,7 +368,7 @@ func (a *applier) Backup() error {
 			object.SetLabels(map[string]string{BackupStorageLabel: schedule.BackupStorageName, ScheduleNameLabel: schedule.Name})
 			object.Object["spec"] = map[string]any{
 				"schedule": schedule.Schedule, "backupOwnerReference": "none", "method": "barmanObjectStore",
-				"cluster": a.DB.Name,
+				"cluster": map[string]any{"name": a.DB.Name},
 			}
 			return controllerutil.SetControllerReference(a.DB, object, a.C.Scheme())
 		})
@@ -256,6 +379,10 @@ func (a *applier) Backup() error {
 	return nil
 }
 
+// [CUSTOM CNPG] DataSource: Cấu hình phục hồi (Restore / PITR) khi khởi tạo cụm CNPG mới:
+// - Lấy thông tin BackupStorage và thông tin cụm nguồn (sourceDB).
+// - Cấu hình "spec.bootstrap.recovery" (chỉ định source và mốc thời gian recoveryTarget nếu dùng PITR).
+// - Cấu hình "spec.externalClusters" kết nối tới Barman S3 Object Store để tải dữ liệu về.
 func (a *applier) DataSource() error {
 	if a.DB.Spec.DataSource == nil {
 		return nil
@@ -307,6 +434,35 @@ func (a *applier) DataSource() error {
 
 func (a *applier) DataImport() error {
 	return errors.New("data import is not yet supported by the CloudNativePG provider")
+}
+
+func (a *applier) currentStorageSize() (resource.Quantity, error) {
+	size, found, err := unstructured.NestedString(a.Object, "spec", "storage", "size")
+	if err != nil {
+		return resource.Quantity{}, fmt.Errorf("read current CloudNativePG storage size: %w", err)
+	}
+	if !found || size == "" {
+		return resource.Quantity{}, nil
+	}
+	currentSize, err := resource.ParseQuantity(size)
+	if err != nil {
+		return resource.Quantity{}, fmt.Errorf("parse current CloudNativePG storage size %q: %w", size, err)
+	}
+	return currentSize, nil
+}
+
+func (a *applier) configureMonitoring(spec map[string]any) error {
+	// [CUSTOM CNPG] Phase 8 (Observability): chỉ bật enablePodMonitor khi CRD PodMonitor của
+	// Prometheus Operator đã cài trên cụm; nếu không, CNPG Cluster vẫn expose metrics ở cổng
+	// "metrics" (9187) nhưng không tự sinh PodMonitor. Xem PLAN.md Phase 8.
+	podMonitorInstalled, err := podMonitorCRDInstalled(a.ctx, a.C)
+	if err != nil {
+		return fmt.Errorf("check PodMonitor CRD: %w", err)
+	}
+	if podMonitorInstalled {
+		spec["monitoring"] = map[string]any{"enablePodMonitor": true}
+	}
+	return nil
 }
 
 func parsePostgreSQLParameters(config string) map[string]any {

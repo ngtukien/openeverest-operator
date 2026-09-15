@@ -50,6 +50,11 @@ func (d *DatabaseClusterDefaulter) Default(ctx context.Context, db *everestv1alp
 	)
 
 	logger.Info("Mutating DatabaseCluster")
+	// CloudNativePG is not represented by an Everest DatabaseEngine object.
+	// Its version must be explicit and is validated by the validating webhook.
+	if db.Spec.Engine.EffectiveProvider() == everestv1alpha1.DatabaseEngineProviderCloudNativePG {
+		return nil
+	}
 
 	// validate some fields
 	// validate .spec.engine.type is supported

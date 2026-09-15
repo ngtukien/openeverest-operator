@@ -57,7 +57,9 @@ spec:
           metadata:
             type: object
           spec:
-            description: DatabaseClusterSpec defines the desired state of DatabaseCluster.
+            description: |-
+              DatabaseClusterSpec defines the desired state of DatabaseCluster.
+              [CUSTOM CNPG] Ràng buộc validation: chỉ engine type "postgresql" mới được phép có trường "provider".
             properties:
               allowUnsafeConfiguration:
                 description: |-
@@ -273,9 +275,10 @@ spec:
                     type: string
                   provider:
                     description: |-
-                      Provider selects the PostgreSQL operator used to reconcile this cluster.
-                      Empty preserves the historical behavior and uses Percona PostgreSQL.
-                      This field is ignored for non-PostgreSQL engines.
+                      [CUSTOM CNPG] Provider chọn operator bên dưới để reconcile PostgreSQL cluster.
+                      Hỗ trợ "percona-postgresql" (mặc định) và "cloudnative-pg".
+                      Giá trị này là bất biến (immutable) sau khi khởi tạo, tránh đổi runtime giữa chừng.
+                      Trường này bị bỏ qua đối với các engine không phải PostgreSQL (pxc, psmdb).
                     enum:
                     - percona-postgresql
                     - cloudnative-pg
@@ -494,8 +497,8 @@ spec:
                   proxy specification will be applied for the given engine. A
                   common use case for setting this field is to control the
                   external access to the database cluster.
-                  For the CloudNativePG provider, Everest does not create a proxy or expose
-                  read-replica endpoints; only Proxy.Expose configures the read-write Service.
+                  [CUSTOM CNPG] Với provider CloudNativePG, Everest không sinh proxy trung gian (như PgBouncer)
+                  mà chỉ tái sử dụng Proxy.Expose để cấu hình Service RW (LoadBalancer/ClusterIP) trỏ thẳng vào Primary.
                 properties:
                   config:
                     description: Config is the proxy configuration
@@ -635,6 +638,188 @@ spec:
                     - proxysql
                     - pgbouncer
                     type: string
+                type: object
+              replica:
+                description: |-
+                  [CUSTOM CNPG] Replica turns this cluster into a CloudNativePG replica cluster: bootstrapped
+                  from an external primary via pg_basebackup, then kept in sync by physical streaming
+                  replication. CloudNativePG-only; xem PLAN.md Phase 11.
+                properties:
+                  enabled:
+                    default: true
+                    description: |-
+                      Enabled keeps this cluster in read-only standby mode, continuously replaying WAL from
+                      Source. Setting it to false promotes the cluster to a writable primary — the DR drill —
+                      and is a one-way transition: a promoted cluster cannot be demoted back by setting it to
+                      true again, it has to be re-bootstrapped.
+                    type: boolean
+                  source:
+                    description: Source is the primary cluster to bootstrap and stream
+                      from.
+                    properties:
+                      caSecretName:
+                        description: |-
+                          CASecretName is a Secret holding ca.crt of the source cluster's CA. Defaults to
+                          "<clusterName>-ca". Ignored when PasswordSecretName is set.
+                        type: string
+                      clientCertSecretName:
+                        description: |-
+                          ClientCertSecretName is a Secret holding tls.crt/tls.key of the replication client
+                          certificate. Defaults to "<clusterName>-replication", the Secret CloudNativePG generates
+                          on the source cluster. Ignored when PasswordSecretName is set.
+                        type: string
+                      clusterName:
+                        description: |-
+                          ClusterName is the name of the source (primary) CloudNativePG cluster. Everest derives the
+                          streaming endpoint and the CloudNativePG-generated TLS Secret names from it.
+                        type: string
+                      dbName:
+                        description: DBName to connect to on the source. Defaults
+                          to "postgres".
+                        type: string
+                      host:
+                        description: |-
+                          Host overrides the derived "<clusterName>-rw.<namespace>.svc" endpoint. Set it when the
+                          primary lives in another Kubernetes cluster and is reached through an external address.
+                        type: string
+                      namespace:
+                        description: Namespace holding the source cluster. Defaults
+                          to this cluster's namespace.
+                        type: string
+                      passwordSecretKey:
+                        description: PasswordSecretKey is the key inside PasswordSecretName.
+                          Defaults to "password".
+                        type: string
+                      passwordSecretName:
+                        description: |-
+                          PasswordSecretName selects password authentication instead of certificate
+                          authentication, using the named Secret in this cluster's namespace.
+                        type: string
+                      port:
+                        description: Port on the source. Defaults to 5432.
+                        format: int32
+                        type: integer
+                      sslMode:
+                        description: |-
+                          SSLMode is the libpq sslmode. Defaults to "verify-full" for certificate authentication
+                          and "prefer" for password authentication.
+                        type: string
+                      user:
+                        description: |-
+                          User is the replication-capable role to connect as. Defaults to "streaming_replica",
+                          the role CloudNativePG creates on every cluster.
+                        type: string
+                    required:
+                    - clusterName
+                    type: object
+                required:
+                - enabled
+                - source
+                type: object
+              replication:
+                description: |-
+                  [CUSTOM CNPG] Replication configures PostgreSQL logical replication (Publication/Subscription)
+                  on top of this cluster. CloudNativePG-only; xem PLAN.md Phase 10.
+                properties:
+                  publications:
+                    description: Publications to create on this cluster.
+                    items:
+                      description: ReplicationPublication declares a PostgreSQL PUBLICATION
+                        owned by this cluster.
+                      properties:
+                        dbName:
+                          description: DBName is the database on this cluster that
+                            owns the publication.
+                          type: string
+                        name:
+                          description: Name is the PostgreSQL publication name.
+                          type: string
+                        target:
+                          description: Target selects which tables are published.
+                            Defaults to allTables when unset.
+                          properties:
+                            allTables:
+                              description: AllTables replicates every table in the
+                                database (PostgreSQL "FOR ALL TABLES").
+                              type: boolean
+                            tables:
+                              description: Tables restricts replication to specific
+                                "schema.table" names. Ignored when allTables is true.
+                              items:
+                                type: string
+                              type: array
+                          type: object
+                      required:
+                      - dbName
+                      - name
+                      type: object
+                    type: array
+                  subscriptions:
+                    description: Subscriptions to create on this cluster, each pulling
+                      from an external PostgreSQL source.
+                    items:
+                      description: |-
+                        ReplicationSubscription declares a PostgreSQL SUBSCRIPTION on this cluster, pulling from an
+                        external publisher. Everest auto-generates the matching CloudNativePG externalCluster entry
+                        from Source; users do not manage spec.externalClusters directly for this purpose.
+                      properties:
+                        dbName:
+                          description: DBName is the database on this cluster that
+                            receives the subscription.
+                          type: string
+                        name:
+                          description: Name is the PostgreSQL subscription name.
+                          type: string
+                        publicationName:
+                          description: PublicationName is the name of the publication
+                            on the source to subscribe to.
+                          type: string
+                        source:
+                          description: Source is the connection info for the external
+                            publisher.
+                          properties:
+                            dbName:
+                              description: DBName is the database on the source to
+                                connect to.
+                              type: string
+                            host:
+                              description: Host is the source PostgreSQL host or Service
+                                DNS name.
+                              type: string
+                            passwordSecretKey:
+                              description: PasswordSecretKey is the key inside PasswordSecretName.
+                                Defaults to "password".
+                              type: string
+                            passwordSecretName:
+                              description: PasswordSecretName is a Secret in the same
+                                namespace holding the source user's password.
+                              type: string
+                            port:
+                              description: Port is the source PostgreSQL port. Defaults
+                                to 5432.
+                              format: int32
+                              type: integer
+                            sslMode:
+                              description: SSLMode is the libpq sslmode. Defaults
+                                to "prefer".
+                              type: string
+                            user:
+                              description: User is the replication-capable PostgreSQL
+                                role to connect as.
+                              type: string
+                          required:
+                          - dbName
+                          - host
+                          - passwordSecretName
+                          - user
+                          type: object
+                      required:
+                      - dbName
+                      - name
+                      - publicationName
+                      - source
+                      type: object
+                    type: array
                 type: object
               sharding:
                 description: Sharding is the sharding configuration. PSMDB-only
@@ -811,6 +996,30 @@ spec:
                   - The database engine version (.spec.engine.version) cannot be modified
                   This field is unset when the CR is already running at the latest recommended version.
                 type: string
+              replica:
+                description: |-
+                  [CUSTOM CNPG] Replica reports the observed replica-cluster (cross-zone DR) state.
+                  Set only when .spec.replica is configured; xem PLAN.md Phase 11.
+                properties:
+                  designatedPrimary:
+                    description: |-
+                      DesignatedPrimary is the Pod acting as the writable leader of the replica cluster: the
+                      instance that streams from SourceHost and cascades to the other replicas.
+                    type: string
+                  enabled:
+                    description: Enabled is true while this cluster is a read-only
+                      standby, false once it has been promoted.
+                    type: boolean
+                  sourceCluster:
+                    description: SourceCluster is the name of the .spec.externalClusters
+                      entry being streamed from.
+                    type: string
+                  sourceHost:
+                    description: SourceHost is the endpoint the WAL is streamed from.
+                    type: string
+                required:
+                - enabled
+                type: object
               size:
                 description: Size is the total number of pods
                 format: int32

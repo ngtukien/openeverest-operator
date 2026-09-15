@@ -107,3 +107,22 @@ func TestDatabaseClusterDefaulter(t *testing.T) {
 	assert.Equal(t, testAccessKey, string(secret.Data[accessKeyIDSecretKey]))
 	assert.Equal(t, testSecretKey, string(secret.Data[secretAccessKeySecretKey]))
 }
+
+func TestDatabaseClusterDefaulter_CNPGDoesNotRequireDatabaseEngine(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, everestv1alpha1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	db := &everestv1alpha1.DatabaseCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "cnpg", Namespace: "databases"},
+		Spec: everestv1alpha1.DatabaseClusterSpec{Engine: everestv1alpha1.Engine{
+			Type:     everestv1alpha1.DatabaseEnginePostgresql,
+			Provider: everestv1alpha1.DatabaseEngineProviderCloudNativePG,
+			Version:  "16.4",
+		}},
+	}
+
+	require.NoError(t, (&DatabaseClusterDefaulter{Client: client}).Default(t.Context(), db))
+	assert.Equal(t, "16.4", db.Spec.Engine.Version)
+}
