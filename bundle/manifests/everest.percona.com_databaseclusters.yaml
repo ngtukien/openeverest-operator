@@ -57,7 +57,9 @@ spec:
           metadata:
             type: object
           spec:
-            description: DatabaseClusterSpec defines the desired state of DatabaseCluster.
+            description: |-
+              DatabaseClusterSpec defines the desired state of DatabaseCluster.
+              [CUSTOM CNPG] Ràng buộc validation: chỉ engine type "postgresql" mới được phép có trường "provider".
             properties:
               allowUnsafeConfiguration:
                 description: |-
@@ -271,11 +273,15 @@ spec:
 
                       NOTE: Updating this property post installation may lead to a restart of the cluster.
                     type: string
+                    x-kubernetes-validations:
+                    - message: .spec.engine.crVersion cannot be changed
+                      rule: self == oldSelf
                   provider:
                     description: |-
-                      Provider selects the PostgreSQL operator used to reconcile this cluster.
-                      Empty preserves the historical behavior and uses Percona PostgreSQL.
-                      This field is ignored for non-PostgreSQL engines.
+                      [CUSTOM CNPG] Provider chọn operator bên dưới để reconcile PostgreSQL cluster.
+                      Hỗ trợ "percona-postgresql" (mặc định) và "cloudnative-pg".
+                      Giá trị này là bất biến (immutable) sau khi khởi tạo, tránh đổi runtime giữa chừng.
+                      Trường này bị bỏ qua đối với các engine không phải PostgreSQL (pxc, psmdb).
                     enum:
                     - percona-postgresql
                     - cloudnative-pg
@@ -494,8 +500,8 @@ spec:
                   proxy specification will be applied for the given engine. A
                   common use case for setting this field is to control the
                   external access to the database cluster.
-                  For the CloudNativePG provider, Everest does not create a proxy or expose
-                  read-replica endpoints; only Proxy.Expose configures the read-write Service.
+                  [CUSTOM CNPG] Với provider CloudNativePG, Everest không sinh proxy trung gian (như PgBouncer)
+                  mà chỉ tái sử dụng Proxy.Expose để cấu hình Service RW (LoadBalancer/ClusterIP) trỏ thẳng vào Primary.
                 properties:
                   config:
                     description: Config is the proxy configuration

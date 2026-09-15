@@ -26,7 +26,9 @@ import (
 	"strings"
 
 	"github.com/AlekSi/pointer"
+	"github.com/Masterminds/semver/v3"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -46,7 +48,9 @@ var (
 	// .spec.engine.
 	dbcEnginePath          = specPath.Child("engine")
 	dbcEngineTypePath      = dbcEnginePath.Child("type")
+	dbcEngineProviderPath  = dbcEnginePath.Child("provider")
 	dbcEngineVersionPath   = dbcEnginePath.Child("version")
+	dbcEngineCRVersionPath = dbcEnginePath.Child("crVersion")
 	dbcUserSecretsNamePath = dbcEnginePath.Child("userSecretsName")
 
 	// .spec.engine.DataSource.
@@ -55,8 +59,15 @@ var (
 
 	// .spec.proxy.
 	dbcProxyPath          = specPath.Child("proxy")
+	dbcProxyTypePath      = dbcProxyPath.Child("type")
+	dbcProxyReplicasPath  = dbcProxyPath.Child("replicas")
+	dbcProxyConfigPath    = dbcProxyPath.Child("config")
+	dbcProxyStoragePath   = dbcProxyPath.Child("storage")
+	dbcProxyResourcesPath = dbcProxyPath.Child("resources")
 	dbcProxyExposePath    = dbcProxyPath.Child("expose")
 	dbcProxyExposeLbcPath = dbcProxyExposePath.Child("loadBalancerConfigName")
+	dbcMonitoringPath     = specPath.Child("monitoring")
+	dbcPausedPath         = specPath.Child("paused")
 
 	// .spec.engineFeatures.
 	dbcEngineFeaturesPath = specPath.Child("engineFeatures")
@@ -64,6 +75,15 @@ var (
 	// .spec.engineFeatures.psmdb.
 	dbcPsmdbEngineFeaturesPath    = dbcEngineFeaturesPath.Child("psmdb")
 	dbcPsmdbShdcEngineFeaturePath = dbcPsmdbEngineFeaturesPath.Child("splitHorizonDnsConfigName")
+
+	// [CUSTOM CNPG] .spec.replication — CloudNativePG-only, xem PLAN.md Phase 10.
+	dbcReplicationPath = specPath.Child("replication")
+
+	// [CUSTOM CNPG] .spec.replica — CloudNativePG-only, xem PLAN.md Phase 11.
+	dbcReplicaPath                  = specPath.Child("replica")
+	dbcReplicaEnabledPath           = dbcReplicaPath.Child("enabled")
+	dbcReplicaSourcePath            = dbcReplicaPath.Child("source")
+	dbcReplicaSourceClusterNamePath = dbcReplicaSourcePath.Child("clusterName")
 )
 
 var dbClusterGroupKind = everestv1alpha1.GroupVersion.WithKind(consts.DatabaseClusterKind).GroupKind()
@@ -99,9 +119,13 @@ func (v *DatabaseClusterValidator) ValidateCreate(ctx context.Context, db *evere
 
 	logger.Info("Validation for DatabaseCluster upon creation")
 
-	// Validate the engine version
-	if errs := v.validateEngineVersion(ctx, db); errs != nil {
-		allErrs = append(allErrs, errs...)
+	isCNPG := db.Spec.Engine.EffectiveProvider() == everestv1alpha1.DatabaseEngineProviderCloudNativePG
+	if isCNPG {
+		allErrs = append(allErrs, v.validateCNPGCapabilities(ctx, db, true)...)
+	} else {
+		// Validate the engine version against the DatabaseEngine catalog for
+		// providers managed through Everest's regular discovery flow.
+		allErrs = append(allErrs, v.validateEngineVersion(ctx, db)...)
 	}
 
 	// If a user secret is specified by the user, ensure that it exists.
@@ -117,7 +141,7 @@ func (v *DatabaseClusterValidator) ValidateCreate(ctx context.Context, db *evere
 	}
 
 	// If a data import source is specified, validate it.
-	if di := pointer.Get(db.Spec.DataSource).DataImport; di != nil {
+	if di := pointer.Get(db.Spec.DataSource).DataImport; di != nil && !isCNPG {
 		if errs := v.validateDataImport(ctx, db); errs != nil {
 			allErrs = append(allErrs, errs...)
 		}
@@ -127,8 +151,13 @@ func (v *DatabaseClusterValidator) ValidateCreate(ctx context.Context, db *evere
 		allErrs = append(allErrs, errs...)
 	}
 
-	if errs := v.validateEngineFeaturesOnCreate(ctx, db); errs != nil {
+	if errs := v.validateEngineFeaturesOnCreate(ctx, db); errs != nil && !isCNPG {
 		allErrs = append(allErrs, errs...)
+	}
+
+	// [CUSTOM CNPG] Replication (Publication/Subscription) is CloudNativePG-only.
+	if db.Spec.Replication != nil && !isCNPG {
+		allErrs = append(allErrs, field.Forbidden(dbcReplicationPath, "replication is only supported by the CloudNativePG provider"))
 	}
 
 	if warn := db.Spec.Proxy.Expose.Type.DeprecationWarning(); warn != "" {
@@ -160,10 +189,18 @@ func (v *DatabaseClusterValidator) ValidateUpdate(ctx context.Context, oldDb, ne
 			errImmutableField(dbcEngineTypePath),
 		})
 	}
+	if oldDb.Spec.Engine.Provider != newDb.Spec.Engine.Provider {
+		return nil, apierrors.NewInvalid(dbClusterGroupKind, oldDb.GetName(), field.ErrorList{
+			errImmutableField(dbcEngineProviderPath),
+		})
+	}
 
-	// Validate the engine version
-	if errs := v.validateEngineVersion(ctx, newDb); errs != nil {
-		allErrs = append(allErrs, errs...)
+	isCNPG := newDb.Spec.Engine.EffectiveProvider() == everestv1alpha1.DatabaseEngineProviderCloudNativePG
+	if isCNPG {
+		allErrs = append(allErrs, v.validateCNPGCapabilities(ctx, newDb, false)...)
+		allErrs = append(allErrs, validateCNPGVersionUpdate(oldDb.Spec.Engine.Version, newDb.Spec.Engine.Version)...)
+	} else {
+		allErrs = append(allErrs, v.validateEngineVersion(ctx, newDb)...)
 	}
 
 	// TODO: move remaining validations from Everest API
@@ -172,8 +209,13 @@ func (v *DatabaseClusterValidator) ValidateUpdate(ctx context.Context, oldDb, ne
 	// 3. Validate storage size change
 	// 3. Validate sharding constraints
 
-	if errs := v.validateEngineFeaturesOnUpdate(ctx, oldDb, newDb); errs != nil {
+	if errs := v.validateEngineFeaturesOnUpdate(ctx, oldDb, newDb); errs != nil && !isCNPG {
 		allErrs = append(allErrs, errs...)
+	}
+
+	// [CUSTOM CNPG] Replication (Publication/Subscription) is CloudNativePG-only.
+	if newDb.Spec.Replication != nil && !isCNPG {
+		allErrs = append(allErrs, field.Forbidden(dbcReplicationPath, "replication is only supported by the CloudNativePG provider"))
 	}
 
 	if warn := newDb.Spec.Proxy.Expose.Type.DeprecationWarning(); warn != "" {
@@ -228,6 +270,99 @@ func (v *DatabaseClusterValidator) validateDataImport(
 		return append(allErrs, errInvalidField(dbcDataImportPath, dataImport.DataImporterName, err.Error()))
 	}
 
+	return nil
+}
+
+func (v *DatabaseClusterValidator) validateCNPGCapabilities(
+	ctx context.Context,
+	db *everestv1alpha1.DatabaseCluster,
+	checkCRD bool,
+) field.ErrorList {
+	var allErrs field.ErrorList
+	engine := db.Spec.Engine
+
+	if engine.Type != everestv1alpha1.DatabaseEnginePostgresql {
+		allErrs = append(allErrs, field.Forbidden(dbcEngineProviderPath, "cloudnative-pg is only supported for PostgreSQL"))
+	}
+	if engine.Version == "" {
+		allErrs = append(allErrs, errRequiredField(dbcEngineVersionPath))
+	} else if _, err := semver.NewVersion(engine.Version); err != nil {
+		allErrs = append(allErrs, errInvalidField(dbcEngineVersionPath, engine.Version, "must be a semantic PostgreSQL version such as 16.4"))
+	}
+	if engine.CRVersion != nil {
+		allErrs = append(allErrs, field.Forbidden(dbcEngineCRVersionPath, "CloudNativePG does not use Everest CR versions"))
+	}
+
+	proxy := db.Spec.Proxy
+	unsupportedProxyMessage := "CloudNativePG does not use an Everest-managed proxy; configure only spec.proxy.expose"
+	if proxy.Type != "" {
+		allErrs = append(allErrs, field.Forbidden(dbcProxyTypePath, unsupportedProxyMessage))
+	}
+	if proxy.Replicas != nil {
+		allErrs = append(allErrs, field.Forbidden(dbcProxyReplicasPath, unsupportedProxyMessage))
+	}
+	if proxy.Config != "" {
+		allErrs = append(allErrs, field.Forbidden(dbcProxyConfigPath, unsupportedProxyMessage))
+	}
+	if proxy.Storage != nil {
+		allErrs = append(allErrs, field.Forbidden(dbcProxyStoragePath, unsupportedProxyMessage))
+	}
+	proxyResources := proxy.Resources.ToResourceRequirements()
+	if len(proxyResources.Limits) != 0 || len(proxyResources.Requests) != 0 {
+		allErrs = append(allErrs, field.Forbidden(dbcProxyResourcesPath, unsupportedProxyMessage))
+	}
+	if db.Spec.Monitoring != nil {
+		allErrs = append(allErrs, field.Forbidden(dbcMonitoringPath, "PMM monitoring is not yet supported by the CloudNativePG provider"))
+	}
+	if pointer.Get(db.Spec.DataSource).DataImport != nil {
+		allErrs = append(allErrs, field.Forbidden(dbcDataImportPath, "data import is not yet supported by the CloudNativePG provider"))
+	}
+	if db.Spec.EngineFeatures != nil {
+		allErrs = append(allErrs, field.Forbidden(dbcEngineFeaturesPath, "engineFeatures are not yet supported by the CloudNativePG provider"))
+	}
+	if db.Spec.Paused {
+		allErrs = append(allErrs, field.Forbidden(dbcPausedPath, "pausing is not yet supported by the CloudNativePG provider"))
+	}
+
+	if checkCRD {
+		crd := &apiextensionsv1.CustomResourceDefinition{}
+		err := v.Client.Get(ctx, types.NamespacedName{Name: consts.CNPGClusterCRDName}, crd)
+		switch {
+		case apierrors.IsNotFound(err):
+			allErrs = append(allErrs, field.Forbidden(
+				dbcEngineProviderPath,
+				fmt.Sprintf("CloudNativePG CRD %q is not installed", consts.CNPGClusterCRDName),
+			))
+		case err != nil:
+			allErrs = append(allErrs, errInvalidField(
+				dbcEngineProviderPath,
+				string(engine.Provider),
+				fmt.Sprintf("could not verify CloudNativePG availability: %v", err),
+			))
+		}
+	}
+
+	return allErrs
+}
+
+func validateCNPGVersionUpdate(oldVersion, newVersion string) field.ErrorList {
+	oldSemver, oldErr := semver.NewVersion(oldVersion)
+	newSemver, newErr := semver.NewVersion(newVersion)
+	if oldErr != nil || newErr != nil {
+		return nil
+	}
+	if oldSemver.Major() != newSemver.Major() {
+		return field.ErrorList{field.Forbidden(
+			dbcEngineVersionPath,
+			fmt.Sprintf("CloudNativePG rolling updates support only minor version changes (current=%s, requested=%s)", oldVersion, newVersion),
+		)}
+	}
+	if newSemver.LessThan(oldSemver) {
+		return field.ErrorList{field.Forbidden(
+			dbcEngineVersionPath,
+			fmt.Sprintf("CloudNativePG PostgreSQL version downgrade is not supported (current=%s, requested=%s)", oldVersion, newVersion),
+		)}
+	}
 	return nil
 }
 

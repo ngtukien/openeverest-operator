@@ -46,6 +46,12 @@ const (
 	CNPGDeploymentName = "cnpg-controller-manager"
 	// CNPGOperatorNamespace is the namespace used by the cluster-wide CNPG installation.
 	CNPGOperatorNamespace = "cnpg-system"
+	// CNPGClusterCRDName is the cluster-scoped CRD required by the CloudNativePG provider.
+	CNPGClusterCRDName = "clusters.postgresql.cnpg.io"
+	// [CUSTOM CNPG] PodMonitorCRDName là CRD của Prometheus Operator. Chỉ khi CRD này tồn tại
+	// trên cụm K8s, CNPG provider mới bật "spec.monitoring.enablePodMonitor" cho Cluster —
+	// tránh lỗi reconcile khi lab chưa cài Prometheus Operator (xem PLAN.md Phase 8).
+	PodMonitorCRDName = "podmonitors.monitoring.coreos.com"
 
 	// PXCAPIGroup is the API group for Percona XtraDB Cluster.
 	PXCAPIGroup = "pxc.percona.com"
@@ -66,9 +72,13 @@ const (
 	// - Cluster: đại diện cho cụm PostgreSQL (instances, storage, WAL).
 	// - Backup: bản sao lưu on-demand.
 	// - ScheduledBackup: lịch sao lưu định kỳ (cron).
-	CNPGClusterKind = "Cluster"
-	CNPGBackupKind = "Backup"
+	CNPGClusterKind         = "Cluster"
+	CNPGBackupKind          = "Backup"
 	CNPGScheduledBackupKind = "ScheduledBackup"
+	// [CUSTOM CNPG] Publication/Subscription: CRD logical replication của CloudNativePG,
+	// xem PLAN.md Phase 10.
+	CNPGPublicationKind  = "Publication"
+	CNPGSubscriptionKind = "Subscription"
 	// PerconaXtraDBClusterRestoreKind is the kind for Percona XtraDB Cluster restore.
 	PerconaXtraDBClusterRestoreKind = "PerconaXtraDBClusterRestore"
 	// LoadBalancerConfigKind is the kind for load balancer configs.

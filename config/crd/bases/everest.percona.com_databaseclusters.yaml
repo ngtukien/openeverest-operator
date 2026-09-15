@@ -57,7 +57,9 @@ spec:
           metadata:
             type: object
           spec:
-            description: DatabaseClusterSpec defines the desired state of DatabaseCluster.
+            description: |-
+              DatabaseClusterSpec defines the desired state of DatabaseCluster.
+              [CUSTOM CNPG] Ràng buộc validation: chỉ engine type "postgresql" mới được phép có trường "provider".
             properties:
               allowUnsafeConfiguration:
                 description: |-
@@ -271,11 +273,15 @@ spec:
 
                       NOTE: Updating this property post installation may lead to a restart of the cluster.
                     type: string
+                    x-kubernetes-validations:
+                    - message: .spec.engine.crVersion cannot be changed
+                      rule: self == oldSelf
                   provider:
                     description: |-
-                      Provider selects the PostgreSQL operator used to reconcile this cluster.
-                      Empty preserves the historical behavior and uses Percona PostgreSQL.
-                      This field is ignored for non-PostgreSQL engines.
+                      [CUSTOM CNPG] Provider chọn operator bên dưới để reconcile PostgreSQL cluster.
+                      Hỗ trợ "percona-postgresql" (mặc định) và "cloudnative-pg".
+                      Giá trị này là bất biến (immutable) sau khi khởi tạo, tránh đổi runtime giữa chừng.
+                      Trường này bị bỏ qua đối với các engine không phải PostgreSQL (pxc, psmdb).
                     enum:
                     - percona-postgresql
                     - cloudnative-pg
@@ -494,8 +500,8 @@ spec:
                   proxy specification will be applied for the given engine. A
                   common use case for setting this field is to control the
                   external access to the database cluster.
-                  For the CloudNativePG provider, Everest does not create a proxy or expose
-                  read-replica endpoints; only Proxy.Expose configures the read-write Service.
+                  [CUSTOM CNPG] Với provider CloudNativePG, Everest không sinh proxy trung gian (như PgBouncer)
+                  mà chỉ tái sử dụng Proxy.Expose để cấu hình Service RW (LoadBalancer/ClusterIP) trỏ thẳng vào Primary.
                 properties:
                   config:
                     description: Config is the proxy configuration
@@ -635,6 +641,111 @@ spec:
                     - proxysql
                     - pgbouncer
                     type: string
+                type: object
+              replication:
+                description: |-
+                  [CUSTOM CNPG] Replication configures PostgreSQL logical replication (Publication/Subscription)
+                  on top of this cluster. CloudNativePG-only; xem PLAN.md Phase 10.
+                properties:
+                  publications:
+                    description: Publications to create on this cluster.
+                    items:
+                      description: ReplicationPublication declares a PostgreSQL PUBLICATION
+                        owned by this cluster.
+                      properties:
+                        dbName:
+                          description: DBName is the database on this cluster that
+                            owns the publication.
+                          type: string
+                        name:
+                          description: Name is the PostgreSQL publication name.
+                          type: string
+                        target:
+                          description: Target selects which tables are published.
+                            Defaults to allTables when unset.
+                          properties:
+                            allTables:
+                              description: AllTables replicates every table in the
+                                database (PostgreSQL "FOR ALL TABLES").
+                              type: boolean
+                            tables:
+                              description: Tables restricts replication to specific
+                                "schema.table" names. Ignored when allTables is true.
+                              items:
+                                type: string
+                              type: array
+                          type: object
+                      required:
+                      - dbName
+                      - name
+                      type: object
+                    type: array
+                  subscriptions:
+                    description: Subscriptions to create on this cluster, each pulling
+                      from an external PostgreSQL source.
+                    items:
+                      description: |-
+                        ReplicationSubscription declares a PostgreSQL SUBSCRIPTION on this cluster, pulling from an
+                        external publisher. Everest auto-generates the matching CloudNativePG externalCluster entry
+                        from Source; users do not manage spec.externalClusters directly for this purpose.
+                      properties:
+                        dbName:
+                          description: DBName is the database on this cluster that
+                            receives the subscription.
+                          type: string
+                        name:
+                          description: Name is the PostgreSQL subscription name.
+                          type: string
+                        publicationName:
+                          description: PublicationName is the name of the publication
+                            on the source to subscribe to.
+                          type: string
+                        source:
+                          description: Source is the connection info for the external
+                            publisher.
+                          properties:
+                            dbName:
+                              description: DBName is the database on the source to
+                                connect to.
+                              type: string
+                            host:
+                              description: Host is the source PostgreSQL host or Service
+                                DNS name.
+                              type: string
+                            passwordSecretKey:
+                              description: PasswordSecretKey is the key inside PasswordSecretName.
+                                Defaults to "password".
+                              type: string
+                            passwordSecretName:
+                              description: PasswordSecretName is a Secret in the same
+                                namespace holding the source user's password.
+                              type: string
+                            port:
+                              description: Port is the source PostgreSQL port. Defaults
+                                to 5432.
+                              format: int32
+                              type: integer
+                            sslMode:
+                              description: SSLMode is the libpq sslmode. Defaults
+                                to "prefer".
+                              type: string
+                            user:
+                              description: User is the replication-capable PostgreSQL
+                                role to connect as.
+                              type: string
+                          required:
+                          - dbName
+                          - host
+                          - passwordSecretName
+                          - user
+                          type: object
+                      required:
+                      - dbName
+                      - name
+                      - publicationName
+                      - source
+                      type: object
+                    type: array
                 type: object
               sharding:
                 description: Sharding is the sharding configuration. PSMDB-only

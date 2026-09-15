@@ -178,7 +178,7 @@ DatabaseCluster (Mới) DataSource ────────►  Cluster.spec.boo
 ---
 
 ### Phase 5 — Database Lifecycle, Scheduling & Online PVC Expansion
-* **Trạng thái:** 🚀 **ĐANG THỰC HIỆN (ACTIVE)**
+* **Trạng thái:** ✅ **CODE ĐÃ XONG (100%)** — ⚠️ *Chờ E2E Test Lab*
 
 #### 1. Kiến trúc kỹ thuật:
 - **Scale ngang (Instances):** Thay đổi `engine.replicas` $\rightarrow$ CNPG tự động tạo Pod mới và clone dữ liệu qua `pg_basebackup` mà không gây downtime cho Primary.
@@ -188,10 +188,12 @@ DatabaseCluster (Mới) DataSource ────────►  Cluster.spec.boo
 
 #### 2. Danh mục công việc & Files liên quan:
 - Cập nhật [`providers/cnpg/provider.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/providers/cnpg/provider.go):
-  - Bổ sung hàm kiểm tra PVC resize để cập nhật `status.status = everestv1alpha1.AppStateResizingVolumes`.
+  - Kiểm tra condition và chênh lệch `PVC.spec.resources.requests.storage`/`PVC.status.capacity` theo nhãn `cnpg.io/cluster`.
+  - Cập nhật `status.status = everestv1alpha1.AppStateResizingVolumes`, ghi nhận lỗi resize và tự trở lại `ready` khi hoàn tất.
 - Cập nhật [`providers/cnpg/applier.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/providers/cnpg/applier.go):
-  - Hoàn thiện chuyển tiếp `PodSchedulingPolicy` (NodeAffinity, PodAntiAffinity, Tolerations).
-  - Đảm bảo cơ chế kiểm tra tính hợp lệ khi nâng cấp version image.
+  - Chuyển tiếp `NodeAffinity`, `PodAffinity` và `PodAntiAffinity` sang đúng schema `spec.affinity` của CNPG.
+  - Chặn thu nhỏ PVC, kiểm tra khả năng volume expansion của StorageClass trước khi cập nhật.
+  - Chỉ cho phép rolling update cùng PostgreSQL major version và chặn downgrade.
 
 #### 3. Tiêu chí nghiệm thu:
 - Tăng số node từ 3 lên 5: Cụm scale thành công, không downtime.
@@ -201,7 +203,7 @@ DatabaseCluster (Mới) DataSource ────────►  Cluster.spec.boo
 ---
 
 ### Phase 6 — Validating Webhook & Capability Guard
-* **Trạng thái:** 📋 **KẾ HOẠCH**
+* **Trạng thái:** ✅ **CODE ĐÃ XONG (100%)** — ⚠️ *Chờ E2E Admission Test Lab*
 
 #### 1. Kiến trúc kỹ thuật:
 Sử dụng Kubernetes Validating Admission Webhook để chặn các cấu hình không hợp lệ ngay tại thời điểm `kubectl apply`, bảo vệ hệ thống khỏi lỗi runtime.
@@ -210,14 +212,16 @@ Sử dụng Kubernetes Validating Admission Webhook để chặn các cấu hìn
 [kubectl apply] ──► [K8s API Server] ──► [Validating Webhook]
                                                 │
                                                 ├─ Hợp lệ ────► Ghi vào etcd
-                                                └─ Không hợp lệ ► Reject ngay lập tức (HTTP 400)
+                                                └─ Không hợp lệ ► Reject ngay lập tức (HTTP 422)
 ```
 
 #### 2. Danh mục công việc:
-- Chặn thay đổi `spec.engine.provider` sau khi tạo (Immutable check).
-- Chặn khai báo `proxy.type` hoặc `proxy.replicas` khi dùng CNPG (chỉ cho phép `proxy.expose`).
-- Kiểm tra sự tồn tại của CRD CNPG trước khi cho phép tạo cluster dạng `cloudnative-pg`.
-- Chặn các tính năng chưa hỗ trợ (PMM Monitoring, Data Import).
+- ✅ Chặn thay đổi `spec.engine.provider` sau khi tạo (Immutable check).
+- ✅ Chặn toàn bộ cấu hình Everest-managed proxy khi dùng CNPG; chỉ cho phép `proxy.expose`.
+- ✅ Kiểm tra CRD `clusters.postgresql.cnpg.io` trước khi cho phép tạo cluster dạng `cloudnative-pg`.
+- ✅ Chặn các tính năng chưa hỗ trợ với thông báo theo đúng field: PMM Monitoring, Data Import, Engine Features, Pause và Everest CR version.
+- ✅ Bỏ phụ thuộc `DatabaseEngine` của Percona trong defaulter/validator khi provider là CNPG; yêu cầu khai báo PostgreSQL version tường minh.
+- ✅ Kiểm tra version update ngay tại admission: cho phép minor upgrade cùng major, chặn downgrade và major upgrade.
 
 #### 3. Tiêu chí nghiệm thu:
 - Sửa provider trên cluster đang chạy $\rightarrow$ Bị Webhook từ chối ngay lập tức.
@@ -226,14 +230,16 @@ Sử dụng Kubernetes Validating Admission Webhook để chặn các cấu hìn
 ---
 
 ### Phase 7 — Phân quyền RBAC & Đóng gói OLM Bundle
-* **Trạng thái:** 📋 **KẾ HOẠCH**
+* **Trạng thái:** ✅ **CODE & BUNDLE ĐÃ XONG (100%)** — ⚠️ *Chờ E2E Test Lab*
 
 #### 1. Kiến trúc kỹ thuật:
 Cập nhật ClusterRole của Everest Operator tuân thủ nguyên tắc đặc quyền tối thiểu (Principle of Least Privilege), chỉ cấp quyền trên đúng API group `postgresql.cnpg.io`. Đóng gói Operator Lifecycle Manager (OLM) CSV/Bundle.
 
 #### 2. Danh mục công việc:
-- Cập nhật [`config/rbac/role.yaml`](file:///home/ngtukien/Projects/DBaaS/operator/config/rbac/role.yaml): Cấp quyền `get, list, watch, create, update, patch, delete` cho `clusters`, `backups`, `scheduledbackups`.
-- Cập nhật OLM ClusterServiceVersion (CSV) và `deploy/bundle.yaml`.
+- ✅ [`config/rbac/role.yaml`](file:///home/ngtukien/Projects/DBaaS/operator/config/rbac/role.yaml): Cấp quyền tường minh `get, list, watch, create, update, patch, delete` cho đúng ba resource CNPG `clusters`, `backups`, `scheduledbackups`; không dùng wildcard.
+- ✅ Đồng bộ quyền CNPG vào OLM ClusterServiceVersion (CSV), bundle manifests và `deploy/bundle.yaml`.
+- ✅ Đóng gói operator version `1.16.2`, khai báo Kubernetes version tối thiểu `1.30.0` và loại bỏ metadata icon rỗng không hợp lệ.
+- ✅ Kiểm tra bundle bằng Operator SDK standard validation và optional Operator Framework suite.
 
 #### 3. Tiêu chí nghiệm thu:
 - Everest Operator chạy bình thường với ServiceAccount mặc định, không gặp lỗi `403 Forbidden` khi thao tác tài nguyên CNPG.
@@ -241,18 +247,38 @@ Cập nhật ClusterRole của Everest Operator tuân thủ nguyên tắc đặc
 ---
 
 ### Phase 8 — Giám sát & Vận hành (Observability)
-* **Trạng thái:** 📋 **KẾ HOẠCH**
+* **Trạng thái:** 🟡 **CODE MỘT PHẦN** — PodMonitor tự động + alert rule cốt lõi đã xong; alert backup-failure và Grafana dashboard còn KẾ HOẠCH; chưa E2E trên cluster thật (lab chưa cài Prometheus Operator).
 
 #### 1. Kiến trúc kỹ thuật:
 Tận dụng Metrics Exporter tích hợp sẵn của CloudNativePG (cổng 9187 trên từng Pod) để xuất metric Prometheus chuẩn (`cnpg_collector_*`), tích hợp vào hệ thống giám sát của Everest/Grafana.
 
-#### 2. Danh mục công việc:
-- Khởi tạo `PodMonitor` hoặc cấu hình Prometheus scrape metrics từ CNPG pods.
-- Giám sát các chỉ số cốt lõi: Replication lag, WAL archiving rate, CPU/RAM saturation, Connection count.
-- Xây dựng AlertManager rules: Cảnh báo failover, mất node Standby, backup lỗi.
+CNPG provider dùng lại đúng pattern Dynamic Discovery của Phase 1 (kiểm tra CRD
+`clusters.postgresql.cnpg.io`): trước khi set `spec.monitoring.enablePodMonitor`
+trên CNPG `Cluster`, `Engine()` kiểm tra CRD `podmonitors.monitoring.coreos.com`
+của Prometheus Operator có tồn tại hay không. Nếu chưa cài, field này bị bỏ qua
+an toàn — không set gì, không lỗi reconcile. Nhờ vậy tính năng này không phá vỡ
+lab hiện tại (chưa cài Prometheus Operator) và tự kích hoạt ngay khi Operator
+được cài sau này.
+
+```text
+[Engine()] ─── Kiểm tra API Server ───► Có CRD podmonitors.monitoring.coreos.com?
+                                              │
+                                              ├─ CÓ ──► spec.monitoring.enablePodMonitor = true
+                                              └─ KHÔNG ► Bỏ qua an toàn (không set field)
+```
+
+#### 2. Danh mục công việc & Files liên quan:
+- ✅ [`internal/consts/consts.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/consts/consts.go): hằng số `PodMonitorCRDName`.
+- ✅ [`internal/controller/everest/providers/cnpg/provider.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/providers/cnpg/provider.go): `podMonitorCRDInstalled()` — dynamic discovery, an toàn với client nil.
+- ✅ [`internal/controller/everest/providers/cnpg/applier.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/providers/cnpg/applier.go): `Engine()` set `spec.monitoring.enablePodMonitor` có điều kiện. Unit test: `TestApplierEngine` (CRD vắng mặt → không set), `TestApplierEngineEnablesPodMonitorWhenCRDInstalled` (CRD có mặt → set `true`).
+- ✅ [`demo/k8s/monitoring/00-cnpg-alerts.yaml`](file:///home/ngtukien/Projects/DBaaS/demo/k8s/monitoring/00-cnpg-alerts.yaml): `PrometheusRule` — instance down, instance count dưới desired (đo RTO failover), replication lag, replica failing replication, WAL archiving failure. Dùng đúng tên metric trong `alerts.yaml` chính thức của CloudNativePG.
+- 📋 Alert "backup thất bại" (ngoài WAL archiving): chưa viết — cần xác nhận tên metric mà `plugin-barman-cloud` (CNPG-I) thực sự export trên cluster thật, vì các metric `cnpg_collector_last_failed_backup_timestamp`/`last_available_backup_timestamp` đã deprecated cho đường native backup. Xem TODO trong `demo/k8s/monitoring/00-cnpg-alerts.yaml`.
+- 📋 Grafana dashboard: chưa có; `demo/k8s/monitoring/README.md` trỏ tới dashboard cộng đồng ID 20417 làm điểm khởi đầu.
+- 📋 Cài đặt Prometheus Operator/Grafana vào `infra/install-platform.sh`: chưa làm — là quyết định hạ tầng riêng, cần xác nhận trước khi thêm.
 
 #### 3. Tiêu chí nghiệm thu:
-- Dashboard Grafana hiển thị đầy đủ thông số sức khỏe và hiệu năng của cụm CNPG.
+- Dashboard Grafana hiển thị đầy đủ thông số sức khỏe và hiệu năng của cụm CNPG. **(chưa kiểm chứng — cần cluster + Prometheus Operator)**
+- CNPG Cluster tự sinh `PodMonitor` khi Prometheus Operator đã cài, không set gì khi chưa cài. **(có unit test, chưa E2E)**
 
 ---
 
@@ -268,7 +294,7 @@ Tận dụng Metrics Exporter tích hợp sẵn của CloudNativePG (cổng 9187
 ---
 
 ### Phase 10 — CNPG Logical Replication (Publication & Subscription)
-* **Trạng thái:** 📋 **KẾ HOẠCH**
+* **Trạng thái:** 🟡 **CODE ĐÃ XONG (Publication/Subscription qua Everest)** — ⚠️ *Chờ E2E Test Lab*; đồng bộ Sequence trước cutover vẫn là quy trình thủ công (xem `demo/k8s/cnpg/README.md` §10), chưa tự động hoá.
 
 #### 1. Kiến trúc kỹ thuật:
 Phục vụ nhu cầu đồng bộ dữ liệu giữa các microservices hoặc giữa các cụm CSDL khác nhau mà không cần đồng bộ toàn bộ đĩa vật lý.
@@ -278,9 +304,35 @@ Phục vụ nhu cầu đồng bộ dữ liệu giữa các microservices hoặc 
  └── Publication.postgresql.cnpg.io  ──Logical──►  └── Subscription.postgresql.cnpg.io
 ```
 
-#### 2. Danh mục công việc:
-- Quản lý CRD `Publication` và `Subscription` của CNPG qua Everest.
-- Đồng bộ Sequence trước cutover và kiểm soát schema DDL gap.
+Everest mở rộng `DatabaseClusterSpec` bằng `spec.replication.publications[]` và
+`spec.replication.subscriptions[]` — cùng cách tiếp cận declarative với
+`spec.backup` (không phải manifest CNPG thuần như `demo/k8s/cnpg/09-subscription.yaml`).
+Mỗi Subscription tự khai báo `source` (host/port/dbname/user/secret); applier tự
+sinh entry `spec.externalClusters` tương ứng (tên `"<subscription>-source"`) trên
+CNPG Cluster — người dùng không cần tự quản lý `externalClusters`. Publication/
+Subscription bị xoá khỏi spec sẽ bị prune khỏi cluster (không để lại object mồ côi),
+cùng triết lý với cách `Backup()` xoá `ScheduledBackup` khi `schedule.Enabled=false`.
+
+```text
+[Everest DatabaseCluster.spec.replication] ──Replication()──► Publication/Subscription CRD (CNPG)
+                                                  │
+                                                  └──► spec.externalClusters["<sub>-source"] (tự sinh, không đụng
+                                                       entry do DataSource() sinh cho restore/PITR)
+```
+
+#### 2. Danh mục công việc & Files liên quan:
+- ✅ [`api/everest/v1alpha1/databasecluster_types.go`](file:///home/ngtukien/Projects/DBaaS/operator/api/everest/v1alpha1/databasecluster_types.go): `Replication`, `ReplicationPublication`, `ReplicationSubscription`, `ReplicationSourceConnection`, `ReplicationTarget`; thêm `Replication() error` vào interface `Applier`.
+- ✅ [`internal/controller/everest/providers/cnpg/replication.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/controller/everest/providers/cnpg/replication.go): sinh/patch CRD `Publication`/`Subscription`, tự merge `spec.externalClusters`, prune object không còn khai báo.
+- ✅ `internal/controller/everest/providers/{pg,psmdb,pxc}/applier.go`: `Replication()` từ chối rõ ràng nếu người dùng khai báo `spec.replication` trên provider không phải CNPG.
+- ✅ [`internal/webhook/everest/v1alpha1/databasecluster_webhook.go`](file:///home/ngtukien/Projects/DBaaS/operator/internal/webhook/everest/v1alpha1/databasecluster_webhook.go): admission-time guard — chặn `spec.replication` ngay lúc `kubectl apply` nếu provider không phải `cloudnative-pg` (không đợi tới reconcile mới báo lỗi), cùng triết lý Phase 6.
+- ✅ Unit test: `replication_test.go` (tạo Publication/Subscription, tự sinh externalClusters, prune khi xoá khỏi spec), `databasecluster_webhook_test.go` (`TestDatabaseClusterValidator_ReplicationIsCNPGOnly`). `go build ./...`, `go vet ./...` và toàn bộ `go test` liên quan đều pass.
+- 📋 Đồng bộ Sequence trước cutover và kiểm soát schema DDL gap: chưa tự động hoá — vẫn theo runbook thủ công trong `demo/k8s/cnpg/README.md` §10 (cutover near-zero downtime).
+- 📋 CRD YAML/RBAC/webhook manifest: đã regenerate bằng `make generate && make manifests`, chưa apply lên cluster thật (đang chờ cluster ổn định).
+
+#### 3. Tiêu chí nghiệm thu:
+- Tạo `DatabaseCluster` với `spec.replication.publications`/`subscriptions` → sinh đúng CRD CNPG, dữ liệu đồng bộ liên tục qua logical replication. **(chưa kiểm chứng trên cluster thật)**
+- Xoá một publication/subscription khỏi spec → object CNPG tương ứng bị prune, không để sót. **(có unit test, chưa E2E)**
+- Khai báo `spec.replication` trên provider không phải CNPG → bị admission webhook từ chối ngay lập tức. **(có unit test)**
 
 ---
 

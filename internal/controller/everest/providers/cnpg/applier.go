@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Masterminds/semver/v3"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -75,6 +77,22 @@ func (a *applier) Engine() error {
 	if engine.Replicas < 1 {
 		return errors.New("CloudNativePG requires at least one PostgreSQL instance")
 	}
+	currentImage, _, err := unstructured.NestedString(a.Object, "spec", "imageName")
+	if err != nil {
+		return fmt.Errorf("read current CloudNativePG image: %w", err)
+	}
+	if err := validateVersionChange(currentImage, engine.Version); err != nil {
+		return err
+	}
+	currentSize := resource.Quantity{}
+	if size, found, nestedErr := unstructured.NestedString(a.Object, "spec", "storage", "size"); nestedErr != nil {
+		return fmt.Errorf("read current CloudNativePG storage size: %w", nestedErr)
+	} else if found && size != "" {
+		currentSize, err = resource.ParseQuantity(size)
+		if err != nil {
+			return fmt.Errorf("parse current CloudNativePG storage size %q: %w", size, err)
+		}
+	}
 
 	resourceRequirements := engine.Resources.ToResourceRequirements()
 	resources, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&resourceRequirements)
@@ -96,6 +114,24 @@ func (a *applier) Engine() error {
 	if engine.Storage.Class != nil {
 		spec["storage"].(map[string]any)["storageClass"] = *engine.Storage.Class
 	}
+	setStorageSize := func(size resource.Quantity, storageClass *string) {
+		storage := spec["storage"].(map[string]any)
+		storage["size"] = size.String()
+		if storageClass != nil {
+			storage["storageClass"] = *storageClass
+		}
+	}
+	if err := common.ConfigureStorage(
+		a.ctx,
+		a.C,
+		a.DB,
+		currentSize,
+		engine.Storage.Size,
+		engine.Storage.Class,
+		setStorageSize,
+	); err != nil {
+		return fmt.Errorf("configure CloudNativePG storage: %w", err)
+	}
 	if engine.UserSecretsName != "" {
 		spec["bootstrap"] = map[string]any{
 			"initdb": map[string]any{
@@ -107,6 +143,14 @@ func (a *applier) Engine() error {
 	}
 	if parameters := parsePostgreSQLParameters(engine.Config); len(parameters) != 0 {
 		spec["postgresql"] = map[string]any{"parameters": parameters}
+	}
+	// [CUSTOM CNPG] Phase 8 (Observability): chỉ bật enablePodMonitor khi CRD PodMonitor của
+	// Prometheus Operator đã cài trên cụm; nếu không, CNPG Cluster vẫn expose metrics ở cổng
+	// "metrics" (9187) nhưng không tự sinh PodMonitor. Xem PLAN.md Phase 8.
+	if podMonitorInstalled, err := podMonitorCRDInstalled(a.ctx, a.C); err != nil {
+		return fmt.Errorf("check PodMonitor CRD: %w", err)
+	} else if podMonitorInstalled {
+		spec["monitoring"] = map[string]any{"enablePodMonitor": true}
 	}
 	a.Object["spec"] = spec
 	return nil
@@ -120,10 +164,10 @@ func (a *applier) EngineFeatures() error {
 }
 
 // [CUSTOM CNPG] Proxy: Xử lý Service Exposure cho CNPG:
-// - CNPG không dùng proxy ngoài do Everest quản lý; nó có sẵn Service native.
-// - Nếu người dùng cấu hình proxy.expose dạng LoadBalancer/NodePort, Everest sẽ khai báo
-//   vào "spec.managed.services.additional" để CNPG tự sinh Service "<cluster>-rw-external"
-//   trỏ trực tiếp vào Primary pod hiện tại.
+//   - CNPG không dùng proxy ngoài do Everest quản lý; nó có sẵn Service native.
+//   - Nếu người dùng cấu hình proxy.expose dạng LoadBalancer/NodePort, Everest sẽ khai báo
+//     vào "spec.managed.services.additional" để CNPG tự sinh Service "<cluster>-rw-external"
+//     trỏ trực tiếp vào Primary pod hiện tại.
 func (a *applier) Proxy() error {
 	proxy := a.DB.Spec.Proxy
 	proxyResources := proxy.Resources.ToResourceRequirements()
@@ -188,18 +232,72 @@ func (a *applier) PodSchedulingPolicy() error {
 		policy.Spec.AffinityConfig.PostgreSQL.Engine == nil {
 		return nil
 	}
-	affinity, err := runtime.DefaultUnstructuredConverter.ToUnstructured(policy.Spec.AffinityConfig.PostgreSQL.Engine)
-	if err != nil {
-		return fmt.Errorf("convert PostgreSQL affinity: %w", err)
+	engineAffinity := policy.Spec.AffinityConfig.PostgreSQL.Engine
+	cnpgAffinity := map[string]any{}
+	if engineAffinity.NodeAffinity != nil {
+		nodeAffinity, err := runtime.DefaultUnstructuredConverter.ToUnstructured(engineAffinity.NodeAffinity)
+		if err != nil {
+			return fmt.Errorf("convert PostgreSQL node affinity: %w", err)
+		}
+		cnpgAffinity["nodeAffinity"] = nodeAffinity
 	}
-	return unstructured.SetNestedMap(a.Object, affinity, "spec", "affinity")
+	if engineAffinity.PodAffinity != nil {
+		podAffinity, err := runtime.DefaultUnstructuredConverter.ToUnstructured(engineAffinity.PodAffinity)
+		if err != nil {
+			return fmt.Errorf("convert PostgreSQL pod affinity: %w", err)
+		}
+		cnpgAffinity["additionalPodAffinity"] = podAffinity
+	}
+	if engineAffinity.PodAntiAffinity != nil {
+		podAntiAffinity, err := runtime.DefaultUnstructuredConverter.ToUnstructured(engineAffinity.PodAntiAffinity)
+		if err != nil {
+			return fmt.Errorf("convert PostgreSQL pod anti-affinity: %w", err)
+		}
+		cnpgAffinity["additionalPodAntiAffinity"] = podAntiAffinity
+	}
+	if len(cnpgAffinity) == 0 {
+		return nil
+	}
+	return unstructured.SetNestedMap(a.Object, cnpgAffinity, "spec", "affinity")
+}
+
+func validateVersionChange(currentImage, desiredVersion string) error {
+	desired, err := semver.NewVersion(desiredVersion)
+	if err != nil {
+		return fmt.Errorf("invalid CloudNativePG PostgreSQL version %q: %w", desiredVersion, err)
+	}
+	if currentImage == "" {
+		return nil
+	}
+
+	lastSlash := strings.LastIndex(currentImage, "/")
+	lastColon := strings.LastIndex(currentImage, ":")
+	if lastColon <= lastSlash {
+		return fmt.Errorf("cannot determine PostgreSQL version from current CloudNativePG image %q", currentImage)
+	}
+	currentVersion := strings.SplitN(currentImage[lastColon+1:], "@", 2)[0]
+	current, err := semver.NewVersion(currentVersion)
+	if err != nil {
+		return fmt.Errorf("cannot determine PostgreSQL version from current CloudNativePG image %q: %w", currentImage, err)
+	}
+	if desired.Major() != current.Major() {
+		return fmt.Errorf(
+			"CloudNativePG rolling updates only support PostgreSQL minor versions: current=%s desired=%s",
+			currentVersion,
+			desiredVersion,
+		)
+	}
+	if desired.LessThan(current) {
+		return fmt.Errorf("CloudNativePG PostgreSQL version downgrade is not supported: current=%s desired=%s", currentVersion, desiredVersion)
+	}
+	return nil
 }
 
 // [CUSTOM CNPG] Backup: Đồng bộ cấu hình sao lưu cho CNPG Cluster:
-// 1. Tìm BackupStorage được chỉ định và ánh xạ vào "spec.backup.barmanObjectStore" của CNPG.
-// 2. Kiểm tra ràng buộc: CNPG chỉ hỗ trợ 1 đích lưu trữ S3 duy nhất cho toàn cụm.
-// 3. Với mỗi lịch trong spec.backup.schedules: tự động sinh ra hoặc xóa tài nguyên
-//    ScheduledBackup ("postgresql.cnpg.io/v1") tương ứng trên K8s.
+//  1. Tìm BackupStorage được chỉ định và ánh xạ vào "spec.backup.barmanObjectStore" của CNPG.
+//  2. Kiểm tra ràng buộc: CNPG chỉ hỗ trợ 1 đích lưu trữ S3 duy nhất cho toàn cụm.
+//  3. Với mỗi lịch trong spec.backup.schedules: tự động sinh ra hoặc xóa tài nguyên
+//     ScheduledBackup ("postgresql.cnpg.io/v1") tương ứng trên K8s.
 func (a *applier) Backup() error {
 	storageNames := map[string]struct{}{}
 	for _, schedule := range a.DB.Spec.Backup.Schedules {

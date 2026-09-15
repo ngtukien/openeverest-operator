@@ -249,6 +249,15 @@ func (r *DatabaseClusterReconciler) reconcileDB(
 				return fmt.Errorf("failed to apply data import: %w", err)
 			}
 		}
+		// [CUSTOM CNPG] ReplicaCluster runs after DataSource: both write spec.bootstrap and
+		// spec.externalClusters on the upstream CNPG Cluster, and the replica-cluster bootstrap
+		// has to be the one that survives. See PLAN.md Phase 11.
+		if err := applier.ReplicaCluster(); err != nil {
+			return fmt.Errorf("failed to apply replica cluster: %w", err)
+		}
+		if err := applier.Replication(); err != nil {
+			return fmt.Errorf("failed to apply replication: %w", err)
+		}
 		return nil
 	}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to create or update database cluster: %w", err)
@@ -1117,7 +1126,7 @@ func (r *DatabaseClusterReconciler) ReconcileWatchers(ctx context.Context) error
 			// Nếu không tìm thấy CRD (IsNotFound), bỏ qua để không gây lỗi khởi động controller.
 			crd := &unstructured.Unstructured{Object: map[string]any{}}
 			crd.SetGroupVersionKind(schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"})
-			if err := r.Get(ctx, types.NamespacedName{Name: "clusters.postgresql.cnpg.io"}, crd); err == nil {
+			if err := r.Get(ctx, types.NamespacedName{Name: consts.CNPGClusterCRDName}, crd); err == nil {
 				cluster := &unstructured.Unstructured{Object: map[string]any{}}
 				cluster.SetGroupVersionKind(schema.GroupVersionKind{Group: consts.CNPGAPIGroup, Version: "v1", Kind: consts.CNPGClusterKind})
 				objects = append(objects, cluster)

@@ -78,6 +78,26 @@ func (p *Provider) DBObject() client.Object {
 	return p.Unstructured
 }
 
+// [CUSTOM CNPG] podMonitorCRDInstalled kiểm tra CRD "podmonitors.monitoring.coreos.com" của
+// Prometheus Operator có tồn tại trên cụm K8s hay không (Dynamic Discovery, cùng kiểu với
+// ReconcileWatchers cho CRD "clusters.postgresql.cnpg.io" — xem PLAN.md Phase 8). Nếu CRD chưa
+// cài, provider bỏ qua an toàn: không bật enablePodMonitor để tránh lỗi reconcile CNPG Cluster.
+func podMonitorCRDInstalled(ctx context.Context, c client.Client) (bool, error) {
+	if c == nil {
+		return false, nil
+	}
+	crd := &unstructured.Unstructured{Object: map[string]any{}}
+	crd.SetGroupVersionKind(schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"})
+	err := c.Get(ctx, types.NamespacedName{Name: consts.PodMonitorCRDName}, crd)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // Cleanup lets Kubernetes garbage collection delete the owned CNPG Cluster.
 func (p *Provider) Cleanup(ctx context.Context, db *everestv1alpha1.DatabaseCluster) (bool, error) {
 	if controllerutil.ContainsFinalizer(db, consts.DBBackupCleanupFinalizer) {
@@ -97,29 +117,48 @@ func (p *Provider) Cleanup(ctx context.Context, db *everestv1alpha1.DatabaseClus
 
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch
 
-// verifyPVCResizingStatus inspects the PVC conditions instead of relying only on
-// the CNPG status. This keeps the Everest status accurate until both the volume
-// expansion and the filesystem resize have completed.
-func verifyPVCResizingStatus(ctx context.Context, c client.Client, name, namespace string) (bool, error) {
+type pvcResizeStatus struct {
+	resizing      bool
+	failed        bool
+	failureReason string
+}
+
+// getPVCResizeStatus inspects CNPG PVC conditions and capacities. PVC
+// conditions can be short-lived, so comparing requested storage with the
+// reported capacity prevents Everest from missing an in-progress expansion.
+func getPVCResizeStatus(ctx context.Context, c client.Client, name, namespace string) (pvcResizeStatus, error) {
 	pvcList := &corev1.PersistentVolumeClaimList{}
 	if err := c.List(ctx, pvcList, client.InNamespace(namespace), client.MatchingLabels{"cnpg.io/cluster": name}); err != nil {
-		return false, fmt.Errorf("failed to list CloudNativePG PVCs: %w", err)
+		return pvcResizeStatus{}, fmt.Errorf("failed to list CloudNativePG PVCs: %w", err)
 	}
+	result := pvcResizeStatus{}
 	for _, pvc := range pvcList.Items {
+		requested, hasRequest := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+		capacity, hasCapacity := pvc.Status.Capacity[corev1.ResourceStorage]
+		if hasRequest && hasCapacity && !capacity.IsZero() && requested.Cmp(capacity) > 0 {
+			result.resizing = true
+		}
 		for _, condition := range pvc.Status.Conditions {
-			if (condition.Type == corev1.PersistentVolumeClaimResizing || condition.Type == corev1.PersistentVolumeClaimFileSystemResizePending) && condition.Status == corev1.ConditionTrue {
-				return true, nil
+			if condition.Status != corev1.ConditionTrue {
+				continue
+			}
+			switch condition.Type {
+			case corev1.PersistentVolumeClaimResizing, corev1.PersistentVolumeClaimFileSystemResizePending:
+				result.resizing = true
+			case corev1.PersistentVolumeClaimControllerResizeError, corev1.PersistentVolumeClaimNodeResizeError:
+				result.resizing = true
+				result.failed = true
+				result.failureReason = condition.Message
 			}
 		}
 	}
-	return false, nil
+	return result, nil
 }
 
 // Status maps CloudNativePG status, PVC resize progress, and resize failures
 // into Everest's stable status model.
 func (p *Provider) Status(ctx context.Context) (everestv1alpha1.DatabaseClusterStatus, bool, error) {
 	status := p.DB.Status
-	previousStatus := status
 	status.Port = 5432
 	status.Hostname = fmt.Sprintf("%s-rw.%s.svc", p.DB.GetName(), p.DB.GetNamespace())
 	status.CRVersion = "v1"
@@ -150,32 +189,27 @@ func (p *Provider) Status(ctx context.Context) (everestv1alpha1.DatabaseClusterS
 	}
 
 	if p.C != nil {
-		// PVC conditions are the source of truth for online expansion. Preserve
-		// the resizing state for one extra reconcile so a resize failure is not
-		// hidden when the upstream operator clears its transient conditions.
-		resizing, resizeErr := verifyPVCResizingStatus(ctx, p.C, p.DB.GetName(), p.DB.GetNamespace())
+		resizeStatus, resizeErr := getPVCResizeStatus(ctx, p.C, p.DB.GetName(), p.DB.GetNamespace())
 		if resizeErr != nil {
 			return status, false, resizeErr
 		}
-		if resizing || previousStatus.Status == everestv1alpha1.AppStateResizingVolumes {
+		meta.RemoveStatusCondition(&status.Conditions, everestv1alpha1.ConditionTypeVolumeResizeFailed)
+		if resizeStatus.resizing {
 			status.Status = everestv1alpha1.AppStateResizingVolumes
-			meta.RemoveStatusCondition(&status.Conditions, everestv1alpha1.ConditionTypeVolumeResizeFailed)
-			failed, message, failureErr := common.VerifyPVCResizeFailure(ctx, p.C, p.DB.GetName(), p.DB.GetNamespace())
-			if failureErr != nil {
-				return status, false, failureErr
-			}
-			if failed {
+			if resizeStatus.failed {
 				meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 					Type:               everestv1alpha1.ConditionTypeVolumeResizeFailed,
 					Status:             metav1.ConditionTrue,
 					Reason:             everestv1alpha1.ReasonVolumeResizeFailed,
-					Message:            message,
+					Message:            resizeStatus.failureReason,
 					LastTransitionTime: metav1.Now(),
 					ObservedGeneration: p.DB.GetGeneration(),
 				})
 			}
 		}
 	}
+
+	status.Replica = p.replicaStatus()
 
 	if rawStatus, found, nestedErr := unstructured.NestedMap(p.Object, "status"); nestedErr != nil {
 		return status, false, nestedErr
