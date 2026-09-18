@@ -29,6 +29,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -51,6 +52,10 @@ import (
 )
 
 const (
+	// Kind của CustomResourceDefinition, dùng cho dynamic discovery.
+	crdKind = "CustomResourceDefinition"
+	// API group của CustomResourceDefinition.
+	crdAPIGroup    = "apiextensions.k8s.io"
 	requeueAfter   = 10 * time.Second
 	upgradeTimeout = 10 * time.Minute
 )
@@ -61,6 +66,10 @@ var operatorEngine = map[string]everestv1alpha1.EngineType{
 	consts.PXCDeploymentName:   everestv1alpha1.DatabaseEnginePXC,
 	consts.PSMDBDeploymentName: everestv1alpha1.DatabaseEnginePSMDB,
 	consts.PGDeploymentName:    everestv1alpha1.DatabaseEnginePostgresql,
+	// [CUSTOM CNPG] CloudNativePG cũng là một provider của engine postgresql, nên có
+	// DatabaseEngine riêng bên cạnh percona-postgresql-operator. Hai CR cùng spec.type nhưng khác
+	// tên; tra cứu theo provider qua common.GetDatabaseEngineForProvider().
+	consts.CNPGDeploymentName: everestv1alpha1.DatabaseEnginePostgresql,
 }
 
 // DatabaseEngineReconciler reconciles a DatabaseEngine object.
@@ -85,6 +94,10 @@ type DatabaseController interface {
 //+kubebuilder:rbac:groups=operators.coreos.com,resources=clusterserviceversions,verbs=get;list;watch;update
 //+kubebuilder:rbac:groups=operators.coreos.com,resources=subscriptions,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=pods,verbs=delete
+
+// [CUSTOM CNPG] Danh mục operand image do platform team quản qua GitOps. Everest CHỈ ĐỌC — không
+// create/update/delete — để không ai nhầm rằng operator có thể tự sửa danh mục đã được duyệt.
+//+kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusterimagecatalogs,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -117,6 +130,15 @@ func (r *DatabaseEngineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// their early returns below.
 	if err := r.reconcileWatchers(ctx); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to reconcile watchers: %w", err)
+	}
+
+	// [CUSTOM CNPG] CloudNativePG đi một đường riêng hoàn toàn: operator cài cluster-wide ở
+	// namespace của chính nó (không phải namespace tenant), không quản lý qua OLM nên không có
+	// InstallPlan/CSV để kiểm tra nâng cấp, và danh sách version đến từ ClusterImageCatalog do
+	// platform team khai qua GitOps chứ không phải Percona Version Service. Vì vậy nhánh này
+	// thoát sớm, trước toàn bộ phần xử lý dành cho operator của Percona bên dưới.
+	if req.Name == consts.CNPGDeploymentName {
+		return ctrl.Result{RequeueAfter: requeueAfter}, r.reconcileCNPGDatabaseEngine(ctx, dbEngine)
 	}
 
 	pendingUpgrades, err := r.listPendingOperatorUpgrades(ctx, dbEngine)
@@ -451,6 +473,95 @@ func (r *DatabaseEngineReconciler) getOperatorStatus(ctx context.Context, name t
 	return ready, version, nil
 }
 
+// [CUSTOM CNPG] reconcileCNPGDatabaseEngine cập nhật DatabaseEngine của provider cloudnative-pg.
+//
+// Khác với các operator của Percona, danh sách version KHÔNG đến từ Percona Version Service mà từ
+// ClusterImageCatalog — một object cluster-scoped do platform team khai qua GitOps. Everest chỉ
+// đọc catalog, không bao giờ tạo hay sửa nó.
+//
+// Cả hai nhánh lỗi đều fail closed một cách có chủ ý: chưa cài CNPG operator, hoặc chưa apply
+// catalog, thì danh sách version rỗng và admission từ chối mọi version. Thà không tạo được cụm
+// còn hơn tạo cụm bằng một image không nằm trong danh mục đã duyệt.
+func (r *DatabaseEngineReconciler) reconcileCNPGDatabaseEngine( //nolint:funcorder
+	ctx context.Context,
+	dbEngine *everestv1alpha1.DatabaseEngine,
+) error {
+	dbEngine.Status.State = everestv1alpha1.DBEngineStateNotInstalled
+	dbEngine.Status.AvailableVersions = everestv1alpha1.Versions{}
+	// CNPG không cài qua OLM nên không có InstallPlan để dò bản nâng cấp. Xoá tàn dư nếu có.
+	dbEngine.Status.PendingOperatorUpgrades = nil
+	dbEngine.Status.OperatorUpgrade = nil
+
+	ready, operatorVersion, err := r.cnpgOperatorStatus(ctx)
+	if err != nil {
+		return err
+	}
+	dbEngine.Status.OperatorVersion = operatorVersion
+	switch {
+	case operatorVersion == "":
+		return r.Status().Update(ctx, dbEngine)
+	case !ready:
+		dbEngine.Status.State = everestv1alpha1.DBEngineStateInstalling
+		return r.Status().Update(ctx, dbEngine)
+	}
+
+	dbEngine.Status.State = everestv1alpha1.DBEngineStateInstalled
+	versions, err := common.CNPGImageCatalogVersions(ctx, r.Client)
+	if err != nil {
+		return err
+	}
+	dbEngine.Status.AvailableVersions = versions
+	return r.Status().Update(ctx, dbEngine)
+}
+
+// [CUSTOM CNPG] cnpgOperatorStatus xác định CloudNativePG đã sẵn sàng hay chưa.
+//
+// KHÔNG dò theo tên Deployment. Tên đó phụ thuộc cách cài: Helm đặt là "<release>-cloudnative-pg"
+// (ví dụ "cnpg-cloudnative-pg"), manifest upstream đặt là "cnpg-controller-manager", OLM lại khác
+// nữa. Gắn cứng một tên nghĩa là Everest báo "not installed" trên một cụm có CNPG chạy tốt.
+//
+// Tín hiệu đúng là CRD "clusters.postgresql.cnpg.io": đó mới là hợp đồng Everest phụ thuộc vào, và
+// nó giống nhau với mọi cách cài. Version operator chỉ là thông tin phụ, dò theo nhãn chuẩn
+// "app.kubernetes.io/name=cloudnative-pg" và chấp nhận không tìm thấy.
+func (r *DatabaseEngineReconciler) cnpgOperatorStatus( //nolint:funcorder
+	ctx context.Context,
+) (bool, string, error) {
+	crd := &unstructured.Unstructured{}
+	crd.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: crdAPIGroup, Version: "v1", Kind: crdKind,
+	})
+	if err := r.Get(ctx, types.NamespacedName{Name: consts.CNPGClusterCRDName}, crd); err != nil {
+		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+			return false, "", nil
+		}
+		return false, "", err
+	}
+
+	// CRD có mặt nghĩa là CNPG đã cài. Version là best-effort.
+	version := "unknown"
+	deployments := &appsv1.DeploymentList{}
+	if err := r.List(
+		ctx, deployments,
+		client.InNamespace(consts.CNPGOperatorNamespace),
+		client.MatchingLabels{"app.kubernetes.io/name": consts.CNPGOperatorAppName},
+	); err == nil {
+		for i := range deployments.Items {
+			containers := deployments.Items[i].Spec.Template.Spec.Containers
+			if len(containers) == 0 {
+				continue
+			}
+			// Không dùng Split(image, ":")[1] như đường Percona: image chỉ pin bằng digest hoặc
+			// không có tag sẽ làm index đó panic ngay trong reconcile loop.
+			image, _, _ := strings.Cut(containers[0].Image, "@")
+			if lastColon := strings.LastIndex(image, ":"); lastColon > strings.LastIndex(image, "/") {
+				version = image[lastColon+1:]
+				break
+			}
+		}
+	}
+	return true, version, nil
+}
+
 func (r *DatabaseEngineReconciler) ensureDBEnginesInNamespaces(ctx context.Context, namespaces []string) ([]reconcile.Request, error) {
 	requests := []reconcile.Request{}
 	for _, ns := range namespaces {
@@ -498,7 +609,8 @@ func (r *DatabaseEngineReconciler) SetupWithManager(mgr ctrl.Manager, namespaces
 		if !ok {
 			return errors.New("expected common.DefaultNamespaceFilter to be of type *NamespaceFilter")
 		}
-		c.Watches(&corev1.Namespace{},
+		c.Watches(
+			&corev1.Namespace{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
 				ns, ok := o.(*corev1.Namespace)
 				if !ok {
@@ -547,7 +659,8 @@ func (r *DatabaseEngineReconciler) isOLMInstalled(ctx context.Context) bool {
 	if err := r.Get(
 		ctx,
 		types.NamespacedName{Name: "subscriptions.operators.coreos.com"},
-		unstructuredResource); err == nil {
+		unstructuredResource,
+	); err == nil {
 		return true
 	}
 	return false

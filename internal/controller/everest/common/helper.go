@@ -194,6 +194,25 @@ func GetDatabaseEngineForType(
 	return GetDatabaseEngine(ctx, c, engineName, namespace)
 }
 
+// GetDatabaseEngineForProvider gets the DatabaseEngine backing a specific provider.
+//
+// [CUSTOM CNPG] PostgreSQL có hai provider, mỗi provider một DatabaseEngine riêng: Percona dùng
+// "percona-postgresql-operator", CloudNativePG dùng "cnpg-controller-manager". Hai CR có cùng
+// spec.type nên không thể phân biệt bằng type — phải tra theo provider.
+func GetDatabaseEngineForProvider(
+	ctx context.Context,
+	c client.Client,
+	engineType everestv1alpha1.EngineType,
+	provider everestv1alpha1.DatabaseEngineProvider,
+	namespace string,
+) (*everestv1alpha1.DatabaseEngine, error) {
+	if engineType == everestv1alpha1.DatabaseEnginePostgresql &&
+		provider == everestv1alpha1.DatabaseEngineProviderCloudNativePG {
+		return GetDatabaseEngine(ctx, c, consts.CNPGDeploymentName, namespace)
+	}
+	return GetDatabaseEngineForType(ctx, c, engineType, namespace)
+}
+
 // GetDatabaseEngine gets the DatabaseEngine object with the specified name and namespace.
 func GetDatabaseEngine(ctx context.Context, c client.Client, name, namespace string) (*everestv1alpha1.DatabaseEngine, error) {
 	engine := &everestv1alpha1.DatabaseEngine{}

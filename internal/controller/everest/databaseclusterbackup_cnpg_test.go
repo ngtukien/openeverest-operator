@@ -44,11 +44,14 @@ func TestReconcileCNPGBackupCreatesClusterReference(t *testing.T) {
 	}
 	registerUnstructuredGVK(scheme, clusterGVK)
 
+	// [CUSTOM CNPG] Cluster được cấu hình qua Barman Cloud Plugin, không phải in-tree.
 	cluster := &unstructured.Unstructured{Object: map[string]any{
 		"spec": map[string]any{
-			"backup": map[string]any{
-				"barmanObjectStore": map[string]any{"destinationPath": "s3://backups/orders"},
-			},
+			"plugins": []any{map[string]any{
+				"name":          consts.BarmanCloudPluginName,
+				"isWALArchiver": true,
+				"parameters":    map[string]any{"barmanObjectName": "orders-s3"},
+			}},
 		},
 	}}
 	cluster.SetGroupVersionKind(clusterGVK)
@@ -79,6 +82,58 @@ func TestReconcileCNPGBackupCreatesClusterReference(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	assert.Equal(t, "orders", clusterName)
+
+	// [CUSTOM CNPG] Backup phải dùng method "plugin"; "barmanObjectStore" là đường in-tree đã
+	// deprecated và không chạy được với operand image flavor standard.
+	method, found, err := unstructured.NestedString(created.Object, "spec", "method")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, "plugin", method)
+	pluginName, found, err := unstructured.NestedString(created.Object, "spec", "pluginConfiguration", "name")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, consts.BarmanCloudPluginName, pluginName)
+}
+
+// [CUSTOM CNPG] Chưa có plugin trên Cluster thì phải requeue chờ, không tạo Backup — tạo sớm sẽ
+// làm Backup hỏng vĩnh viễn thay vì retry sạch.
+func TestReconcileCNPGBackupWaitsForPlugin(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, everestv1alpha1.AddToScheme(scheme))
+	registerUnstructuredGVK(scheme, cnpgprovider.BackupGVK)
+	clusterGVK := schema.GroupVersionKind{
+		Group: consts.CNPGAPIGroup, Version: "v1", Kind: consts.CNPGClusterKind,
+	}
+	registerUnstructuredGVK(scheme, clusterGVK)
+
+	cluster := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{}}}
+	cluster.SetGroupVersionKind(clusterGVK)
+	cluster.SetName("orders")
+	cluster.SetNamespace("databases")
+
+	backup := &everestv1alpha1.DatabaseClusterBackup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "orders-manual", Namespace: "databases", UID: types.UID("backup-uid"),
+		},
+		Spec: everestv1alpha1.DatabaseClusterBackupSpec{
+			DBClusterName: "orders", BackupStorageName: "s3",
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cluster).Build()
+	reconciler := &DatabaseClusterBackupReconciler{Client: client, Scheme: scheme}
+
+	requeue, err := reconciler.reconcileCNPG(context.Background(), backup)
+	require.NoError(t, err)
+	assert.True(t, requeue)
+
+	created := &unstructured.Unstructured{Object: map[string]any{}}
+	created.SetGroupVersionKind(cnpgprovider.BackupGVK)
+	err = client.Get(context.Background(), types.NamespacedName{
+		Name: "orders-manual", Namespace: "databases",
+	}, created)
+	require.Error(t, err, "Backup không được tạo khi Cluster chưa có plugin")
 }
 
 func registerUnstructuredGVK(scheme *runtime.Scheme, gvk schema.GroupVersionKind) {

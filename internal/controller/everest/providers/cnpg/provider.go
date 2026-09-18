@@ -60,16 +60,24 @@ func New(ctx context.Context, opts providers.ProviderOptions) (*Provider, error)
 		return nil, err
 	}
 
-	version := opts.DB.Spec.Engine.Version
-	opts.DBEngine = &everestv1alpha1.DatabaseEngine{}
-	if version != "" {
-		opts.DBEngine.Status.AvailableVersions.Engine = everestv1alpha1.ComponentsMap{
-			version: {
-				ImagePath: fmt.Sprintf("ghcr.io/cloudnative-pg/postgresql:%s", version),
-				Status:    everestv1alpha1.DBEngineComponentAvailable,
-			},
-		}
+	// [CUSTOM CNPG] Danh sách operand image đến từ DatabaseEngine "cnpg-controller-manager", do
+	// DatabaseEngineReconciler đổ vào từ ClusterImageCatalog mà platform team quản qua GitOps.
+	// Applier tra ImagePath ở đây để ghi spec.imageName — nhờ vậy image được pin bằng digest và
+	// kiểm soát tập trung, thay vì ghép chuỗi "ghcr.io/cloudnative-pg/postgresql:<version>".
+	//
+	// DatabaseEngine vắng mặt không phải lỗi chí mạng: cụm đang chạy vẫn phải reconcile được khi
+	// CR đó chưa kịp tạo. Lúc đó danh sách version rỗng và Engine() sẽ báo lỗi rõ ràng nếu người
+	// dùng chưa khai version.
+	dbEngine, err := common.GetDatabaseEngineForProvider(
+		ctx, opts.C,
+		opts.DB.Spec.Engine.Type,
+		everestv1alpha1.DatabaseEngineProviderCloudNativePG,
+		opts.DB.GetNamespace(),
+	)
+	if err != nil {
+		dbEngine = &everestv1alpha1.DatabaseEngine{}
 	}
+	opts.DBEngine = dbEngine
 	return &Provider{Unstructured: cluster, ProviderOptions: opts}, nil
 }
 
@@ -94,12 +102,18 @@ func (p *Provider) DBObject() client.Object {
 // ReconcileWatchers cho CRD "clusters.postgresql.cnpg.io" — xem PLAN.md Phase 8). Nếu CRD chưa
 // cài, provider bỏ qua an toàn: không bật enablePodMonitor để tránh lỗi reconcile CNPG Cluster.
 func podMonitorCRDInstalled(ctx context.Context, c client.Client) (bool, error) {
+	return crdInstalled(ctx, c, consts.PodMonitorCRDName)
+}
+
+// [CUSTOM CNPG] crdInstalled là Dynamic Discovery dùng chung: kiểm tra một CRD có mặt trên cụm
+// hay không, để provider quyết định bật/tắt tính năng phụ thuộc vào nó thay vì lỗi reconcile.
+func crdInstalled(ctx context.Context, c client.Client, name string) (bool, error) {
 	if c == nil {
 		return false, nil
 	}
 	crd := &unstructured.Unstructured{Object: map[string]any{}}
 	crd.SetGroupVersionKind(schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"})
-	err := c.Get(ctx, types.NamespacedName{Name: consts.PodMonitorCRDName}, crd)
+	err := c.Get(ctx, types.NamespacedName{Name: name}, crd)
 	if apierrors.IsNotFound(err) {
 		return false, nil
 	}
@@ -171,7 +185,15 @@ func getPVCResizeStatus(ctx context.Context, c client.Client, name, namespace st
 func (p *Provider) Status(ctx context.Context) (everestv1alpha1.DatabaseClusterStatus, bool, error) {
 	status := p.DB.Status
 	status.Port = 5432
-	status.Hostname = fmt.Sprintf("%s-rw.%s.svc", p.DB.GetName(), p.DB.GetNamespace())
+	// [CUSTOM CNPG] Khi bật pooler, ĐƯỜNG VÀO là Service của pooler chứ không phải "<cluster>-rw".
+	// status.Hostname là hợp đồng kết nối Everest công bố, nên nó phải trỏ đúng lớp mà ứng dụng
+	// cần nối tới. KHÔNG fallback về "rw" khi pooler hỏng: fallback tạo connection storm và phá
+	// đúng giới hạn mà pooler sinh ra để bảo vệ.
+	entrypoint := p.DB.GetName() + "-rw"
+	if poolerEnabled(p.DB) {
+		entrypoint = poolerName(p.DB.GetName())
+	}
+	status.Hostname = fmt.Sprintf("%s.%s.svc", entrypoint, p.DB.GetNamespace())
 	status.CRVersion = "v1"
 
 	desired, _, _ := unstructured.NestedInt64(p.Object, "spec", "instances")

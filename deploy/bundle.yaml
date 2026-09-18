@@ -74,6 +74,21 @@ spec:
                   ForcePathStyle is set to use path-style URLs.
                   If unspecified, the default value is false.
                 type: boolean
+              objectStore:
+                description: |-
+                  [CUSTOM CNPG] ObjectStore is a fragment of a Barman Cloud Plugin ObjectStore ".spec"
+                  (barmancloud.cnpg.io/v1), written exactly as in an ObjectStore manifest. It carries HOW
+                  clusters back up to this storage: retentionPolicy, instanceSidecarConfiguration and
+                  configuration.wal / configuration.data (compression, encryption, parallelism) and tags.
+                  WHERE comes from the fields above (bucket, endpointURL, credentials, region) and is rejected
+                  here, as are serverName and raw barman-cloud command arguments.
+
+                  Every CloudNativePG DatabaseCluster archiving to this storage gets its own ObjectStore
+                  "<cluster>-<storage>" with this policy; clusters needing a different policy use another
+                  BackupStorage on the same bucket. Never applied to the store a restore reads from.
+                  Ignored by the Percona providers. Xem PLAN.md Phase 12.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
               region:
                 description: Region is a region where the bucket is located.
                 type: string
@@ -525,6 +540,20 @@ spec:
                       type: object
                     type: array
                 type: object
+              cnpg:
+                description: |-
+                  [CUSTOM CNPG] CNPG is a fragment of a CloudNativePG Cluster ".spec", written exactly as in a
+                  postgresql.cnpg.io/v1 Cluster manifest (bootstrap, externalClusters, postgresql.synchronous,
+                  managed.roles, replica, replicationSlots, primaryUpdateStrategy, ...). Everest merges it
+                  into the Cluster it generates and CloudNativePG reconciles it natively.
+
+                  Fields Everest owns (instances, imageName, imageCatalogRef, resources, storage size and
+                  class, including their storage.pvcTemplate forms) are rejected here: set them through
+                  spec.engine. Any
+                  other field Everest also generates must carry the same value, otherwise reconcile fails
+                  naming the conflicting path. CloudNativePG-only; xem PLAN.md Phase 12.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
               dataSource:
                 description: DataSource defines a data source for bootstraping a new
                   cluster
@@ -9386,6 +9415,18 @@ rules:
   - list
   - watch
 - apiGroups:
+  - barmancloud.cnpg.io
+  resources:
+  - objectstores
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - batch
   resources:
   - jobs
@@ -9522,11 +9563,9 @@ rules:
   - update
   - watch
 - apiGroups:
-  - postgresql.cnpg.io
+  - policy
   resources:
-  - backups
-  - clusters
-  - scheduledbackups
+  - poddisruptionbudgets
   verbs:
   - create
   - delete
@@ -9534,6 +9573,31 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - postgresql.cnpg.io
+  resources:
+  - backups
+  - clusters
+  - poolers
+  - publications
+  - scheduledbackups
+  - subscriptions
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - postgresql.cnpg.io
+  resources:
+  - clusterimagecatalogs
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - psmdb.percona.com
@@ -10060,6 +10124,26 @@ webhooks:
     - DELETE
     resources:
     - splithorizondnsconfigs
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: everest-operator-webhook-service
+      namespace: everest-operator-system
+      path: /validate-everest-percona-com-v1alpha1-backupstorage
+  failurePolicy: Fail
+  name: vbackupstorage-v1alpha1.everest.percona.com
+  rules:
+  - apiGroups:
+    - everest.percona.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - backupstorages
   sideEffects: None
 - admissionReviewVersions:
   - v1

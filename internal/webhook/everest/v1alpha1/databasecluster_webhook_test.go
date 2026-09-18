@@ -46,6 +46,9 @@ const (
 	dbcTestPsmdbDbVersion = "7.0.15-9"
 	dbcTestPgDbVersion    = "17.1"
 	dbcTestPxcDbVersion   = "8.0.42-33.1"
+	// [CUSTOM CNPG] Version khả dụng của provider cloudnative-pg trong fixture.
+	dbcTestCNPGDbVersion = "16.4"
+	dbcTestCNPGImage     = "ghcr.io/cloudnative-pg/postgresql:16.4-standard-bookworm"
 )
 
 func TestCheckJSONKeyExists(t *testing.T) {
@@ -167,6 +170,27 @@ func TestDatabaseClusterValidator_ValidateCreate(t *testing.T) { //nolint:mainti
 					Engine: everestv1alpha1.ComponentsMap{
 						dbcTestPgDbVersion: {
 							Status: everestv1alpha1.DBEngineComponentRecommended,
+						},
+					},
+				},
+			},
+		},
+		// [CUSTOM CNPG] DatabaseEngine của provider cloudnative-pg. Trên cụm thật, danh sách
+		// version ở đây do DatabaseEngineReconciler đổ vào từ ClusterImageCatalog.
+		&everestv1alpha1.DatabaseEngine{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      consts.CNPGDeploymentName,
+				Namespace: dbcTestDbNamespace,
+			},
+			Spec: everestv1alpha1.DatabaseEngineSpec{
+				Type: everestv1alpha1.DatabaseEnginePostgresql,
+			},
+			Status: everestv1alpha1.DatabaseEngineStatus{
+				AvailableVersions: everestv1alpha1.Versions{
+					Engine: everestv1alpha1.ComponentsMap{
+						dbcTestCNPGDbVersion: {
+							ImagePath: dbcTestCNPGImage,
+							Status:    everestv1alpha1.DBEngineComponentRecommended,
 						},
 					},
 				},
@@ -521,6 +545,27 @@ func TestDatabaseClusterValidator_ValidateUpdate(t *testing.T) {
 				},
 			},
 		},
+		// [CUSTOM CNPG] DatabaseEngine của provider cloudnative-pg. Trên cụm thật, danh sách
+		// version ở đây do DatabaseEngineReconciler đổ vào từ ClusterImageCatalog.
+		&everestv1alpha1.DatabaseEngine{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      consts.CNPGDeploymentName,
+				Namespace: dbcTestDbNamespace,
+			},
+			Spec: everestv1alpha1.DatabaseEngineSpec{
+				Type: everestv1alpha1.DatabaseEnginePostgresql,
+			},
+			Status: everestv1alpha1.DatabaseEngineStatus{
+				AvailableVersions: everestv1alpha1.Versions{
+					Engine: everestv1alpha1.ComponentsMap{
+						dbcTestCNPGDbVersion: {
+							ImagePath: dbcTestCNPGImage,
+							Status:    everestv1alpha1.DBEngineComponentRecommended,
+						},
+					},
+				},
+			},
+		},
 		&everestv1alpha1.DatabaseEngine{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      consts.PXCDeploymentName,
@@ -768,6 +813,23 @@ func TestDatabaseClusterValidator_CNPGCreateCapabilityGuards(t *testing.T) {
 	utilruntime.Must(everestv1alpha1.AddToScheme(scheme))
 	crd := &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: consts.CNPGClusterCRDName}}
 
+	// [CUSTOM CNPG] Danh sách version khả dụng của provider cloudnative-pg. Trên cụm thật,
+	// DatabaseEngineReconciler đổ nội dung này vào từ ClusterImageCatalog.
+	cnpgEngine := &everestv1alpha1.DatabaseEngine{
+		ObjectMeta: metav1.ObjectMeta{Name: consts.CNPGDeploymentName, Namespace: dbcTestDbNamespace},
+		Spec:       everestv1alpha1.DatabaseEngineSpec{Type: everestv1alpha1.DatabaseEnginePostgresql},
+		Status: everestv1alpha1.DatabaseEngineStatus{
+			AvailableVersions: everestv1alpha1.Versions{
+				Engine: everestv1alpha1.ComponentsMap{
+					dbcTestCNPGDbVersion: {
+						ImagePath: dbcTestCNPGImage,
+						Status:    everestv1alpha1.DBEngineComponentRecommended,
+					},
+				},
+			},
+		},
+	}
+
 	newDB := func() *everestv1alpha1.DatabaseCluster {
 		return &everestv1alpha1.DatabaseCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: dbcTestDbName, Namespace: dbcTestDbNamespace},
@@ -787,11 +849,35 @@ func TestDatabaseClusterValidator_CNPGCreateCapabilityGuards(t *testing.T) {
 		{name: "valid", withCRD: true},
 		{name: "CNPG CRD missing", wantError: "is not installed"},
 		{
-			name: "Everest proxy configuration is unsupported", withCRD: true,
+			// [CUSTOM CNPG] pgbouncer nay ĐƯỢC hỗ trợ: Everest dựng CRD Pooler của CNPG.
+			name: "pgbouncer pooler is accepted", withCRD: true,
 			modify: func(db *everestv1alpha1.DatabaseCluster) {
 				db.Spec.Proxy.Type = everestv1alpha1.ProxyTypePGBouncer
 			},
-			wantError: "configure only spec.proxy.expose",
+		},
+		{
+			name: "other proxy types are rejected", withCRD: true,
+			modify: func(db *everestv1alpha1.DatabaseCluster) {
+				db.Spec.Proxy.Type = everestv1alpha1.ProxyTypeHAProxy
+			},
+			wantError: "spec.proxy.type",
+		},
+		{
+			// proxy.config là chuỗi INI tự do — cần API có kiểu trước khi mở.
+			name: "free-form proxy config is rejected", withCRD: true,
+			modify: func(db *everestv1alpha1.DatabaseCluster) {
+				db.Spec.Proxy.Type = everestv1alpha1.ProxyTypePGBouncer
+				db.Spec.Proxy.Config = "pool_mode = statement"
+			},
+			wantError: "spec.proxy.config",
+		},
+		{
+			// Khai replicas mà không bật pooler dễ khiến người dùng tưởng đã có pooler.
+			name: "proxy replicas without pooler is rejected", withCRD: true,
+			modify: func(db *everestv1alpha1.DatabaseCluster) {
+				db.Spec.Proxy.Replicas = new(int32)
+			},
+			wantError: "spec.proxy.type=pgbouncer",
 		},
 		{
 			name: "PMM monitoring is unsupported", withCRD: true,
@@ -807,12 +893,22 @@ func TestDatabaseClusterValidator_CNPGCreateCapabilityGuards(t *testing.T) {
 			},
 			wantError: "data import is not yet supported",
 		},
+		{
+			// [CUSTOM CNPG] Version ngoài ClusterImageCatalog phải bị từ chối ngay tại admission.
+			// Trước đây nhánh CNPG bỏ qua kiểm tra này nên cụm dựng lên rồi mới chết ở
+			// ImagePullBackOff, không có thông báo nào nói version không tồn tại.
+			name: "engine version outside the image catalog is rejected", withCRD: true,
+			modify: func(db *everestv1alpha1.DatabaseCluster) {
+				db.Spec.Engine.Version = "99.99"
+			},
+			wantError: "spec.engine.version",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			objects := []ctrlclient.Object{}
+			objects := []ctrlclient.Object{cnpgEngine.DeepCopy()}
 			if tc.withCRD {
 				objects = append(objects, crd.DeepCopy())
 			}

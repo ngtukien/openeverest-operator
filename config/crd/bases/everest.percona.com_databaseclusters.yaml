@@ -126,6 +126,20 @@ spec:
                       type: object
                     type: array
                 type: object
+              cnpg:
+                description: |-
+                  [CUSTOM CNPG] CNPG is a fragment of a CloudNativePG Cluster ".spec", written exactly as in a
+                  postgresql.cnpg.io/v1 Cluster manifest (bootstrap, externalClusters, postgresql.synchronous,
+                  managed.roles, replica, replicationSlots, primaryUpdateStrategy, ...). Everest merges it
+                  into the Cluster it generates and CloudNativePG reconciles it natively.
+
+                  Fields Everest owns (instances, imageName, imageCatalogRef, resources, storage size and
+                  class, including their storage.pvcTemplate forms) are rejected here: set them through
+                  spec.engine. Any
+                  other field Everest also generates must carry the same value, otherwise reconcile fails
+                  naming the conflicting path. CloudNativePG-only; xem PLAN.md Phase 12.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
               dataSource:
                 description: DataSource defines a data source for bootstraping a new
                   cluster

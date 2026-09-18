@@ -1010,7 +1010,8 @@ func (r *DatabaseClusterBackupReconciler) reconcilePSMDB(
 	if psmdbCluster.Status.BackupConfigHash == "" && versionCheck {
 		logger.Info(
 			fmt.Sprintf("Backup configuration is not ready yet for PerconaServerMongoDB='%s', requeuing",
-				client.ObjectKeyFromObject(psmdbCluster)))
+				client.ObjectKeyFromObject(psmdbCluster)),
+		)
 		return true, nil
 	}
 
@@ -1159,22 +1160,29 @@ func (r *DatabaseClusterBackupReconciler) reconcileCNPG(
 	if err := r.Get(ctx, types.NamespacedName{Namespace: backup.Namespace, Name: backup.Spec.DBClusterName}, cluster); err != nil {
 		return false, err
 	}
-	if _, configured, err := unstructured.NestedMap(cluster.Object, "spec", "backup", "barmanObjectStore"); err != nil {
+	// [CUSTOM CNPG] Cổng chờ phải nhìn vào "spec.plugins", KHÔNG phải "spec.backup.barmanObjectStore".
+	// Sao lưu nay đi qua Barman Cloud Plugin nên trường in-tree kia vĩnh viễn vắng mặt — gate cũ sẽ
+	// requeue vô hạn và Backup không bao giờ được tạo.
+	plugins, _, err := unstructured.NestedSlice(cluster.Object, "spec", "plugins")
+	if err != nil {
 		return false, err
-	} else if !configured {
+	}
+	if !hasBarmanCloudPlugin(plugins) {
 		// The DatabaseCluster reconciler adds the requested BackupStorage to the
 		// CNPG Cluster first. Creating the Backup before that would permanently
 		// fail it instead of allowing a clean retry.
 		return true, nil
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, upstream, func() error {
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, upstream, func() error {
 		upstream.SetLabels(map[string]string{
 			consts.DatabaseClusterNameLabel: backup.Spec.DBClusterName,
 			cnpgprovider.BackupStorageLabel: backup.Spec.BackupStorageName,
 		})
 		upstream.Object["spec"] = map[string]any{
-			"method":  "barmanObjectStore",
-			"cluster": map[string]any{"name": backup.Spec.DBClusterName},
+			// [CUSTOM CNPG] Base backup do plugin chụp; đích lưu trữ lấy từ spec.plugins của Cluster.
+			"method":              "plugin",
+			"pluginConfiguration": map[string]any{"name": consts.BarmanCloudPluginName},
+			"cluster":             map[string]any{"name": backup.Spec.DBClusterName},
 		}
 		if metav1.GetControllerOf(upstream) == nil {
 			return controllerutil.SetControllerReference(backup, upstream, r.Scheme)
@@ -1185,6 +1193,20 @@ func (r *DatabaseClusterBackupReconciler) reconcileCNPG(
 	// dynamic watcher normally makes this immediate, while the requeue keeps
 	// status convergence reliable if a watch event is missed.
 	return true, err
+}
+
+// [CUSTOM CNPG] hasBarmanCloudPlugin cho biết Cluster đã được cấu hình Barman Cloud Plugin chưa.
+func hasBarmanCloudPlugin(plugins []any) bool {
+	for _, raw := range plugins {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, _ := entry["name"].(string); name == consts.BarmanCloudPluginName {
+			return true
+		}
+	}
+	return false
 }
 
 // Reconcile PG.

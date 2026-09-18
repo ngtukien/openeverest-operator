@@ -389,6 +389,11 @@ func main() {
 			setupLog.Error(err, "unable to create validation webhook", "webhook", "DatabaseClusterBackup")
 			os.Exit(1)
 		}
+		// [CUSTOM CNPG] BackupStorage.spec.objectStore — chính sách backup, xem PLAN.md Phase 12.
+		if err := webhookeverestv1alpha1.SetupBackupStorageWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create validation webhook", "webhook", "BackupStorage")
+			os.Exit(1)
+		}
 
 		// ------------------ Engine Features webhooks ------------------
 		if err := webhookenginefeatureseverestv1alpha1.SetupSplitHorizonDNSConfigWebhookWithManager(mgr); err != nil {

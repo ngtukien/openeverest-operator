@@ -17,6 +17,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 const (
@@ -59,6 +60,27 @@ type BackupStorageSpec struct {
 	//
 	// Deprecated: BackupStorages are now used only in the namespaces where they are created.
 	AllowedNamespaces []string `json:"allowedNamespaces,omitempty"`
+	// [CUSTOM CNPG] ObjectStore is a fragment of a Barman Cloud Plugin ObjectStore ".spec"
+	// (barmancloud.cnpg.io/v1), written exactly as in an ObjectStore manifest. It carries HOW
+	// clusters back up to this storage: retentionPolicy, instanceSidecarConfiguration and
+	// configuration.wal / configuration.data (compression, encryption, parallelism) and tags.
+	// WHERE comes from the fields above (bucket, endpointURL, credentials, region) and is rejected
+	// here, as are serverName and raw barman-cloud command arguments.
+	//
+	// Every CloudNativePG DatabaseCluster archiving to this storage gets its own ObjectStore
+	// "<cluster>-<storage>" with this policy; clusters needing a different policy use another
+	// BackupStorage on the same bucket. Never applied to the store a restore reads from.
+	// Ignored by the Percona providers. Xem PLAN.md Phase 12.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	// +optional
+	ObjectStore *runtime.RawExtension `json:"objectStore,omitempty"`
+}
+
+// ObjectStoreSpec decodes spec.objectStore into an unstructured ObjectStore spec fragment. It
+// returns nil when unset.
+func (in *BackupStorageSpec) ObjectStoreSpec() (map[string]any, error) {
+	return decodeRawObject(in.ObjectStore, "spec.objectStore")
 }
 
 // BackupStorageStatus defines the observed state of BackupStorage.

@@ -90,7 +90,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-09-15T05:25:26Z"
+    createdAt: "2026-09-17T07:37:07Z"
     operators.operatorframework.io/builder: operator-sdk-v1.40.0
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
   name: everest-operator.v0.0.0
@@ -213,6 +213,18 @@ spec:
           verbs:
           - get
           - list
+          - watch
+        - apiGroups:
+          - barmancloud.cnpg.io
+          resources:
+          - objectstores
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
           - watch
         - apiGroups:
           - batch
@@ -351,11 +363,9 @@ spec:
           - update
           - watch
         - apiGroups:
-          - postgresql.cnpg.io
+          - policy
           resources:
-          - backups
-          - clusters
-          - scheduledbackups
+          - poddisruptionbudgets
           verbs:
           - create
           - delete
@@ -363,6 +373,31 @@ spec:
           - list
           - patch
           - update
+          - watch
+        - apiGroups:
+          - postgresql.cnpg.io
+          resources:
+          - backups
+          - clusters
+          - poolers
+          - publications
+          - scheduledbackups
+          - subscriptions
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - postgresql.cnpg.io
+          resources:
+          - clusterimagecatalogs
+          verbs:
+          - get
+          - list
           - watch
         - apiGroups:
           - psmdb.percona.com
@@ -678,6 +713,26 @@ spec:
     targetPort: 9443
     type: MutatingAdmissionWebhook
     webhookPath: /mutate-enginefeatures-everest-percona-com-v1alpha1-splithorizondnsconfig
+  - admissionReviewVersions:
+    - v1
+    containerPort: 443
+    deploymentName: everest-operator-controller-manager
+    failurePolicy: Fail
+    generateName: vbackupstorage-v1alpha1.everest.percona.com
+    rules:
+    - apiGroups:
+      - everest.percona.com
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - backupstorages
+    sideEffects: None
+    targetPort: 9443
+    type: ValidatingAdmissionWebhook
+    webhookPath: /validate-everest-percona-com-v1alpha1-backupstorage
   - admissionReviewVersions:
     - v1
     containerPort: 443
