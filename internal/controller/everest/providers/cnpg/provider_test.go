@@ -415,7 +415,7 @@ func newScheduledBackupFixture(t *testing.T) (*runtime.Scheme, *everestv1alpha1.
 	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, everestv1alpha1.AddToScheme(scheme))
-	for _, gvk := range []schema.GroupVersionKind{ScheduledBackupGVK, ObjectStoreGVK} {
+	for _, gvk := range []schema.GroupVersionKind{ScheduledBackupGVK, ObjectStoreGVK, clusterGVK} {
 		scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
 		listGVK := gvk
 		listGVK.Kind += listKindSuffix
@@ -494,7 +494,7 @@ func TestBackupObjectStorePolicyFromBackupStorage(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
 	require.NoError(t, everestv1alpha1.AddToScheme(scheme))
-	for _, gvk := range []schema.GroupVersionKind{ScheduledBackupGVK, ObjectStoreGVK} {
+	for _, gvk := range []schema.GroupVersionKind{ScheduledBackupGVK, ObjectStoreGVK, clusterGVK} {
 		scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
 		listGVK := gvk
 		listGVK.Kind += listKindSuffix
@@ -658,7 +658,21 @@ func TestBackupDeletesLegacyObjectStore(t *testing.T) {
 		Unstructured:    &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{}}},
 		ProviderOptions: providers.ProviderOptions{DB: db, C: c},
 	}
-	require.NoError(t, (&applier{Provider: provider, ctx: context.Background()}).Backup())
+	a := &applier{Provider: provider, ctx: context.Background()}
+
+	// Cluster đang chạy vẫn archive vào store cũ: một bước sau Backup() có thể lỗi và bản mới không
+	// được ghi xuống, nên CHƯA được xoá.
+	live := newUnstructured(clusterGVK, testNamespace, testClusterName)
+	live.Object["spec"] = map[string]any{"plugins": []any{archiverPluginConfiguration("orders-s3", "")}}
+	require.NoError(t, c.Create(context.Background(), live))
+	require.NoError(t, a.Backup())
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "orders-s3"},
+		newUnstructured(ObjectStoreGVK, "", "")), "store cũ còn được Cluster đang chạy dùng thì phải giữ")
+
+	// Cluster đã chuyển sang store dùng chung: vòng reconcile sau mới dọn.
+	live.Object["spec"] = map[string]any{"plugins": []any{archiverPluginConfiguration("s3", ServerName(db))}}
+	require.NoError(t, c.Update(context.Background(), live))
+	require.NoError(t, a.Backup())
 
 	get := func(obj client.Object, name string) error {
 		return c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: name}, obj)

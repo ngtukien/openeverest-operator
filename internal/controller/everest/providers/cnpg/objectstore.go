@@ -231,9 +231,18 @@ func (a *applier) reconcileRecoveryObjectStore(storage *everestv1alpha1.BackupSt
 // deleteLegacyObjectStores xoá ObjectStore riêng từng cụm (<cụm>-<storage>) và Secret region của
 // nó do thiết kế trước sinh ra. Chỉ xoá object mà CHÍNH cụm này là controller owner — không bao giờ
 // đụng store dùng chung hay store người dùng tự tạo trùng tên.
+//
+// Chỉ xoá khi Cluster ĐANG CHẠY (đọc từ API, không phải bản đang dựng trong vòng reconcile này)
+// không còn trỏ vào store. Bản đang dựng chỉ được ghi xuống nếu các bước sau cũng thành công; xoá
+// sớm mà một bước sau lỗi thì Cluster vẫn archive vào store đã mất — WAL archiving gãy. Vòng
+// reconcile kế tiếp, sau khi Cluster đã chuyển sang store dùng chung, mới dọn.
 func (a *applier) deleteLegacyObjectStores() error {
 	installed, err := crdInstalled(a.ctx, a.C, consts.BarmanCloudObjectStoreCRDName)
 	if err != nil || !installed {
+		return err
+	}
+	inUse, err := a.liveClusterObjectStores()
+	if err != nil {
 		return err
 	}
 	list := &unstructured.UnstructuredList{}
@@ -245,6 +254,9 @@ func (a *applier) deleteLegacyObjectStores() error {
 		store := &list.Items[i]
 		storageName := store.GetLabels()[BackupStorageLabel]
 		if store.GetName() != legacyObjectStoreName(a.DB.Name, storageName) || !metav1.IsControlledBy(store, a.DB) {
+			continue
+		}
+		if _, used := inUse[store.GetName()]; used {
 			continue
 		}
 		if err := a.C.Delete(a.ctx, store); client.IgnoreNotFound(err) != nil {
@@ -261,6 +273,33 @@ func (a *applier) deleteLegacyObjectStores() error {
 		}
 	}
 	return nil
+}
+
+// liveClusterObjectStores trả về tên các ObjectStore mà CNPG Cluster đang chạy trỏ tới, qua
+// spec.plugins (archive) và spec.externalClusters[].plugin (restore). Cluster chưa tồn tại thì rỗng.
+func (a *applier) liveClusterObjectStores() (map[string]struct{}, error) {
+	live := newUnstructured(clusterGVK, a.DB.Namespace, a.DB.Name)
+	if err := a.C.Get(a.ctx, client.ObjectKeyFromObject(live), live); err != nil {
+		return nil, client.IgnoreNotFound(err)
+	}
+	names := map[string]struct{}{}
+	collect := func(plugin any) {
+		entry, _ := plugin.(map[string]any)
+		parameters, _ := entry[fieldParameters].(map[string]any)
+		if name, _ := parameters[parameterBarmanObjectName].(string); name != "" {
+			names[name] = struct{}{}
+		}
+	}
+	plugins, _, _ := unstructured.NestedSlice(live.Object, "spec", "plugins")
+	for _, plugin := range plugins {
+		collect(plugin)
+	}
+	externals, _, _ := unstructured.NestedSlice(live.Object, "spec", "externalClusters")
+	for _, raw := range externals {
+		entry, _ := raw.(map[string]any)
+		collect(entry["plugin"])
+	}
+	return names, nil
 }
 
 // ensurePluginInstalled báo thẳng khi thiếu Barman Cloud Plugin. Plugin cài riêng, không đi kèm
