@@ -48,6 +48,7 @@ func SetupBackupStorageWebhookWithManager(mgr manager.Manager) error {
 		Complete()
 }
 
+//nolint:lll
 // +kubebuilder:webhook:path=/validate-everest-percona-com-v1alpha1-backupstorage,mutating=false,failurePolicy=fail,sideEffects=None,groups=everest.percona.com,resources=backupstorages,verbs=create;update,versions=v1alpha1,name=vbackupstorage-v1alpha1.everest.percona.com,admissionReviewVersions=v1
 
 // BackupStorageValidator validates the BackupStorage resource.

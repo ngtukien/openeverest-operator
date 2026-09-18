@@ -38,12 +38,12 @@ import (
 func newPassthroughApplier(t *testing.T, cnpgSpec string, mutate func(*everestv1alpha1.DatabaseCluster)) (*applier, *Provider) {
 	t.Helper()
 	db := &everestv1alpha1.DatabaseCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "databases"},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testNamespace},
 		Spec: everestv1alpha1.DatabaseClusterSpec{
 			Engine: everestv1alpha1.Engine{
-				Type: everestv1alpha1.DatabaseEnginePostgresql, Version: "16.4", Replicas: 3,
+				Type: everestv1alpha1.DatabaseEnginePostgresql, Version: testEngineVersion, Replicas: 3,
 				Storage:         everestv1alpha1.Storage{Size: resource.MustParse("1Gi")},
-				UserSecretsName: "app-creds",
+				UserSecretsName: testUserSecret,
 			},
 			CNPG: &runtime.RawExtension{Raw: []byte(cnpgSpec)},
 		},
@@ -54,14 +54,14 @@ func newPassthroughApplier(t *testing.T, cnpgSpec string, mutate func(*everestv1
 	engine := &everestv1alpha1.DatabaseEngine{
 		Status: everestv1alpha1.DatabaseEngineStatus{
 			AvailableVersions: everestv1alpha1.Versions{
-				Engine: everestv1alpha1.ComponentsMap{"16.4": {ImagePath: "registry.example/postgresql:16.4"}},
+				Engine: everestv1alpha1.ComponentsMap{testEngineVersion: {ImagePath: testEngineImage}},
 			},
 		},
 	}
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "app-creds", Namespace: "databases"},
+		ObjectMeta: metav1.ObjectMeta{Name: testUserSecret, Namespace: testNamespace},
 		Data:       map[string][]byte{corev1.BasicAuthUsernameKey: []byte("db_user")},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
@@ -104,13 +104,13 @@ func TestPassthroughMergesCNPGNativeFields(t *testing.T) {
 	// initdb: database lấy từ spec.cnpg, owner/secret từ userSecretsName, import đi thẳng xuống.
 	assert.Equal(t, "trove", mustNested(t, spec, "spec", "bootstrap", "initdb", "database"))
 	assert.Equal(t, "db_user", mustNested(t, spec, "spec", "bootstrap", "initdb", "owner"))
-	assert.Equal(t, "app-creds", mustNested(t, spec, "spec", "bootstrap", "initdb", "secret", "name"))
+	assert.Equal(t, testUserSecret, mustNested(t, spec, "spec", "bootstrap", "initdb", "secret", fieldName))
 	assert.Equal(t, "microservice", mustNested(t, spec, "spec", "bootstrap", "initdb", "import", "type"))
 	assert.Len(t, mustNested(t, spec, "spec", "externalClusters"), 1)
 
 	// CNPG chỉ thấy Secret người dùng tạo đổi password nếu Secret mang label này.
 	secret := &corev1.Secret{}
-	require.NoError(t, a.C.Get(context.Background(), types.NamespacedName{Namespace: "databases", Name: "app-creds"}, secret))
+	require.NoError(t, a.C.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: testUserSecret}, secret))
 	assert.Equal(t, "true", secret.Labels["cnpg.io/reload"])
 
 	roles, ok := mustNested(t, spec, "spec", "managed", "roles").([]any)
@@ -118,8 +118,8 @@ func TestPassthroughMergesCNPGNativeFields(t *testing.T) {
 	require.Len(t, roles, 2, "role Everest sinh từ userSecretsName và role người dùng khai phải cùng tồn tại")
 	owner, ok := roles[0].(map[string]any)
 	require.True(t, ok)
-	assert.Equal(t, "db_user", owner["name"])
-	assert.Equal(t, map[string]any{"name": "app-creds"}, owner["passwordSecret"])
+	assert.Equal(t, "db_user", owner[fieldName])
+	assert.Equal(t, map[string]any{fieldName: testUserSecret}, owner["passwordSecret"])
 }
 
 // [CUSTOM CNPG] storage và plugins gộp theo từng field/tên: pvcTemplate, resizeInUseVolumes đi

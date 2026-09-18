@@ -97,10 +97,10 @@ func (a *applier) reconcilePooler(serviceTemplate map[string]any) error {
 	}
 
 	spec := map[string]any{
-		fieldCluster: map[string]any{fieldName: a.DB.Name},
-		"type":       "rw",
-		"instances":  instances,
-		"pgbouncer":  pgbouncer,
+		fieldCluster:   map[string]any{fieldName: a.DB.Name},
+		"type":         "rw",
+		fieldInstances: instances,
+		"pgbouncer":    pgbouncer,
 	}
 	if serviceTemplate != nil {
 		spec["serviceTemplate"] = serviceTemplate
@@ -116,8 +116,8 @@ func (a *applier) reconcilePooler(serviceTemplate map[string]any) error {
 		spec["template"] = map[string]any{
 			"spec": map[string]any{
 				"containers": []any{map[string]any{
-					fieldName:   "pgbouncer",
-					"resources": resources,
+					fieldName:      "pgbouncer",
+					fieldResources: resources,
 				}},
 			},
 		}

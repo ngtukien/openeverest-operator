@@ -25,22 +25,22 @@ import (
 )
 
 // OwnedSpecPaths are the CloudNativePG Cluster spec paths Everest always generates from
-// spec.engine. spec.cnpg may not set them: a second source of truth for instance count, image
+// spec.engine. The spec.cnpg field may not set them: a second source of truth for instance count, image
 // or storage is exactly what makes a DBaaS drift. The value names the Everest field to use.
 var OwnedSpecPaths = []struct {
 	Path        []string
 	EverestPath string
 }{
-	{Path: []string{"instances"}, EverestPath: "spec.engine.replicas"},
+	{Path: []string{fieldInstances}, EverestPath: "spec.engine.replicas"},
 	{Path: []string{"imageName"}, EverestPath: "spec.engine.version"},
 	{Path: []string{"imageCatalogRef"}, EverestPath: "spec.engine.version"},
-	{Path: []string{"storage", "size"}, EverestPath: "spec.engine.storage.size"},
-	{Path: []string{"storage", "storageClass"}, EverestPath: "spec.engine.storage.class"},
+	{Path: []string{fieldStorage, "size"}, EverestPath: "spec.engine.storage.size"},
+	{Path: []string{fieldStorage, "storageClass"}, EverestPath: "spec.engine.storage.class"},
 	// CNPG lets storage.size/storageClass override these and only emits an admission warning,
 	// which Everest's client drops: the value would be accepted and silently ignored.
-	{Path: []string{"storage", "pvcTemplate", "resources", "requests", "storage"}, EverestPath: "spec.engine.storage.size"},
-	{Path: []string{"storage", "pvcTemplate", "storageClassName"}, EverestPath: "spec.engine.storage.class"},
-	{Path: []string{"resources"}, EverestPath: "spec.engine.resources"},
+	{Path: []string{fieldStorage, "pvcTemplate", fieldResources, "requests", fieldStorage}, EverestPath: "spec.engine.storage.size"},
+	{Path: []string{fieldStorage, "pvcTemplate", "storageClassName"}, EverestPath: "spec.engine.storage.class"},
+	{Path: []string{fieldResources}, EverestPath: "spec.engine.resources"},
 	// In-tree Barman: CNPG rejects it next to the plugin WAL archiver Everest configures, and it
 	// cannot run on the `standard` operand images of the ClusterImageCatalog (see objectstore.go).
 	{Path: []string{"backup", "barmanObjectStore"}, EverestPath: "spec.backup.schedules and the BackupStorage's spec.objectStore"},
@@ -54,7 +54,7 @@ var _ everestv1alpha1.PassthroughApplier = (*applier)(nil)
 // Cluster mà các bước trước của pipeline vừa dựng (PLAN.md Phase 12).
 //
 // Chạy SAU CÙNG để thấy toàn bộ phần Everest sinh ra. Everest chỉ là trung gian: mọi cơ chế
-// CNPG tự reconcile được (synchronous, managed.roles, replica, replicationSlots...) đi thẳng
+// CNPG tự reconcile được (synchronous, managed.roles, replica, replicationSlots và các field khác) đi thẳng
 // xuống mà không cần Everest dịch lại từng field.
 //
 // Không có "ai thắng": nếu cả hai cùng đặt một field với giá trị khác nhau thì reconcile lỗi và

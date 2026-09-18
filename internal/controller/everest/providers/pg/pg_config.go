@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 
 	"github.com/go-ini/ini"
@@ -138,9 +139,7 @@ func ParsePgBouncerConfig(config string) (crunchyv1beta1.PGBouncerConfiguration,
 			if out.Global == nil {
 				out.Global = make(map[string]string)
 			}
-			for k, v := range sec.KeysHash() {
-				out.Global[k] = v
-			}
+			maps.Copy(out.Global, sec.KeysHash())
 		case pgBouncerSectionDatabases:
 			if len(sec.Keys()) == 0 {
 				continue
@@ -148,9 +147,7 @@ func ParsePgBouncerConfig(config string) (crunchyv1beta1.PGBouncerConfiguration,
 			if out.Databases == nil {
 				out.Databases = make(map[string]string)
 			}
-			for k, v := range sec.KeysHash() {
-				out.Databases[k] = v
-			}
+			maps.Copy(out.Databases, sec.KeysHash())
 		case pgBouncerSectionUsers:
 			if len(sec.Keys()) == 0 {
 				continue
@@ -158,9 +155,7 @@ func ParsePgBouncerConfig(config string) (crunchyv1beta1.PGBouncerConfiguration,
 			if out.Users == nil {
 				out.Users = make(map[string]string)
 			}
-			for k, v := range sec.KeysHash() {
-				out.Users[k] = v
-			}
+			maps.Copy(out.Users, sec.KeysHash())
 		default:
 			return crunchyv1beta1.PGBouncerConfiguration{}, fmt.Errorf(
 				"unknown pgbouncer config section %q: expected one of [pgbouncer], [databases], [users]", name,

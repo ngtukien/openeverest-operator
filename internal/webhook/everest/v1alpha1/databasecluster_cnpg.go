@@ -44,7 +44,7 @@ var (
 // provider sẽ gặp lúc reconcile. Lỗi reconcile chỉ hiện SAU khi apply (condition ReconcileFailed trong
 // status), còn lỗi ở đây hiện
 // ngay trong output của kubectl apply — nên mọi thứ kiểm tra được mà không cần đọc cụm đều nên
-// nằm ở đây. Phần còn lại (giá trị sinh ra từ BackupStorage, PodSchedulingPolicy...) do bước
+// nằm ở đây. Phần còn lại (giá trị sinh ra từ BackupStorage, PodSchedulingPolicy và các nguồn khác) do bước
 // gộp lúc reconcile bắt.
 func validateCNPGPassthrough(db *everestv1alpha1.DatabaseCluster, isCNPG bool) field.ErrorList {
 	if db.Spec.CNPG == nil {
@@ -79,7 +79,7 @@ func validateCNPGPassthrough(db *everestv1alpha1.DatabaseCluster, isCNPG bool) f
 	return allErrs
 }
 
-// validateCNPGBootstrapSource: CNPG chỉ nhận MỘT phương thức bootstrap. dataSource và replica của
+// validateCNPGBootstrapSource: CNPG chỉ nhận MỘT phương thức bootstrap. Hai field dataSource và replica của
 // Everest đã sinh bootstrap riêng; userSecretsName sinh initdb cùng owner/secret.
 func validateCNPGBootstrapSource(db *everestv1alpha1.DatabaseCluster, user map[string]any) field.ErrorList {
 	bootstrap, found := user["bootstrap"].(map[string]any)

@@ -196,10 +196,10 @@ func (p *Provider) Status(ctx context.Context) (everestv1alpha1.DatabaseClusterS
 	status.Hostname = fmt.Sprintf("%s.%s.svc", entrypoint, p.DB.GetNamespace())
 	status.CRVersion = "v1"
 
-	desired, _, _ := unstructured.NestedInt64(p.Object, "spec", "instances")
+	desired, _, _ := unstructured.NestedInt64(p.Object, "spec", fieldInstances)
 	ready, _, _ := unstructured.NestedInt64(p.Object, "status", "readyInstances")
-	status.Size = int32(desired) //nolint:gosec -- CNPG instance counts are bounded by its CRD.
-	status.Ready = int32(ready)  //nolint:gosec -- CNPG instance counts are bounded by its CRD.
+	status.Size = int32(desired) //nolint:gosec // CNPG instance counts are bounded by its CRD.
+	status.Ready = int32(ready)  //nolint:gosec // CNPG instance counts are bounded by its CRD.
 
 	conditions, _, err := unstructured.NestedSlice(p.Object, "status", "conditions")
 	if err != nil {

@@ -782,10 +782,10 @@ const (
 	ConditionTypeVolumeResizeFailed = "VolumeResizeFailed"
 	// ConditionTypeImportFailed is a condition type that indicates that the data import failed.
 	ConditionTypeImportFailed = "ImportFailed"
-	// [CUSTOM CNPG] ConditionTypeReconcileFailed indicates that the last reconciliation could not
+	// ConditionTypeReconcileFailed indicates that the last reconciliation could not
 	// apply the DatabaseCluster spec to the underlying operator's resources. The running database
 	// keeps its previous configuration, so status.status may still read "ready". Removed as soon
-	// as a reconciliation succeeds.
+	// as a reconciliation succeeds. Added by the CloudNativePG provider.
 	ConditionTypeReconcileFailed = "ReconcileFailed"
 )
 

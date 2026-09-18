@@ -48,7 +48,7 @@ func TestSetReconcileFailedCondition(t *testing.T) {
 		t.Parallel()
 		// Đúng dạng lỗi CreateOrUpdate trả về khi ValidatingAdmissionPolicy từ chối: bị bọc qua
 		// hai lớp fmt.Errorf.
-		denied := k8serrors.NewInvalid(schema.GroupKind{Group: "postgresql.cnpg.io", Kind: "Cluster"}, "orders", nil)
+		denied := k8serrors.NewInvalid(schema.GroupKind{Group: "postgresql.cnpg.io", Kind: "Cluster"}, testCNPGCluster, nil)
 		err := fmt.Errorf("failed to create or update database cluster: %w", denied)
 		status := everestv1alpha1.DatabaseClusterStatus{}
 		setReconcileFailedCondition(&status, err, 7)
@@ -78,7 +78,7 @@ func TestSetReconcileFailedCondition(t *testing.T) {
 
 	t.Run("conflict keeps the previous state", func(t *testing.T) {
 		t.Parallel()
-		conflict := fmt.Errorf("wrapped: %w", k8serrors.NewConflict(clusterGR, "orders", errors.New("modified")))
+		conflict := fmt.Errorf("wrapped: %w", k8serrors.NewConflict(clusterGR, testCNPGCluster, errors.New("modified")))
 
 		status := everestv1alpha1.DatabaseClusterStatus{}
 		setReconcileFailedCondition(&status, errors.New("real failure"), 1)
@@ -113,7 +113,7 @@ func (p *statusStubProvider) RunPreReconcileHook(context.Context) (providers.Hoo
 	return providers.HookResult{}, nil
 }
 
-func (p *statusStubProvider) Apply(context.Context) everestv1alpha1.Applier { return nil }
+func (p *statusStubProvider) Apply(context.Context) everestv1alpha1.Applier { return nil } //nolint:ireturn
 
 func (p *statusStubProvider) Status(context.Context) (everestv1alpha1.DatabaseClusterStatus, bool, error) {
 	status := p.db.Status
@@ -125,7 +125,7 @@ func (p *statusStubProvider) Cleanup(context.Context, *everestv1alpha1.DatabaseC
 	return true, nil
 }
 
-func (p *statusStubProvider) DBObject() client.Object { return nil }
+func (p *statusStubProvider) DBObject() client.Object { return nil } //nolint:ireturn
 
 // [CUSTOM CNPG] Condition phải thật sự tới API server qua status subresource, và biến mất ở lần
 // reconcile thành công kế tiếp.
@@ -134,7 +134,7 @@ func TestReconcileDBStatusPersistsReconcileFailed(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, everestv1alpha1.AddToScheme(scheme))
 	db := &everestv1alpha1.DatabaseCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "databases", Generation: 3},
+		ObjectMeta: metav1.ObjectMeta{Name: testCNPGCluster, Namespace: testCNPGNamespace, Generation: 3},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(db).
 		WithStatusSubresource(&everestv1alpha1.DatabaseCluster{}).Build()

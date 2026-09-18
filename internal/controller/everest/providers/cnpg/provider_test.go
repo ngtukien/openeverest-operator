@@ -38,19 +38,36 @@ import (
 )
 
 const (
-	listKindSuffix = "List"
-	testPoolerName = "orders-pooler-rw"
+	testNamespace     = "databases"
+	testClusterName   = "orders"
+	testInstanceName  = "orders-1"
+	testClusterLabel  = "cnpg.io/cluster"
+	fieldMetadata     = "metadata"
+	testEngineVersion = "16.4"
+	testEngineImage   = "registry.example/postgresql:16.4"
+	testUserSecret    = "app-creds"
+	listKindSuffix    = "List"
+	testPoolerName    = "orders-pooler-rw"
 )
+
+// crdObject dựng một CustomResourceDefinition tối thiểu để provider phát hiện CRD có mặt.
+func crdObject(name string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion":  "apiextensions.k8s.io/v1",
+		"kind":        "CustomResourceDefinition",
+		fieldMetadata: map[string]any{fieldName: name},
+	}}
+}
 
 func TestApplierEngine(t *testing.T) {
 	t.Parallel()
 	storageClass := "longhorn"
 	db := &everestv1alpha1.DatabaseCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "databases"},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testNamespace},
 		Spec: everestv1alpha1.DatabaseClusterSpec{
 			Engine: everestv1alpha1.Engine{
 				Type:     everestv1alpha1.DatabaseEnginePostgresql,
-				Version:  "16.4",
+				Version:  testEngineVersion,
 				Replicas: 3,
 				Storage: everestv1alpha1.Storage{
 					Size: resource.MustParse("20Gi"), Class: &storageClass,
@@ -71,7 +88,7 @@ func TestApplierEngine(t *testing.T) {
 		Status: everestv1alpha1.DatabaseEngineStatus{
 			AvailableVersions: everestv1alpha1.Versions{
 				Engine: everestv1alpha1.ComponentsMap{
-					"16.4": {ImagePath: "registry.example/postgresql:16.4"},
+					testEngineVersion: {ImagePath: testEngineImage},
 				},
 			},
 		},
@@ -86,7 +103,7 @@ func TestApplierEngine(t *testing.T) {
 	require.NoError(t, a.Engine())
 
 	assert.Equal(t, int64(3), mustNested(t, provider.Object, "spec", "instances"))
-	assert.Equal(t, "registry.example/postgresql:16.4", mustNested(t, provider.Object, "spec", "imageName"))
+	assert.Equal(t, testEngineImage, mustNested(t, provider.Object, "spec", "imageName"))
 	assert.Equal(t, "20Gi", mustNested(t, provider.Object, "spec", "storage", "size"))
 	assert.Equal(t, "longhorn", mustNested(t, provider.Object, "spec", "storage", "storageClass"))
 	assert.Equal(t, "200", mustNested(t, provider.Object, "spec", "postgresql", "parameters", "max_connections"))
@@ -100,11 +117,11 @@ func TestApplierEngine(t *testing.T) {
 func TestApplierEngineEnablesPodMonitorWhenCRDInstalled(t *testing.T) {
 	t.Parallel()
 	db := &everestv1alpha1.DatabaseCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "databases"},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testNamespace},
 		Spec: everestv1alpha1.DatabaseClusterSpec{
 			Engine: everestv1alpha1.Engine{
 				Type:     everestv1alpha1.DatabaseEnginePostgresql,
-				Version:  "16.4",
+				Version:  testEngineVersion,
 				Replicas: 1,
 				Storage:  everestv1alpha1.Storage{Size: resource.MustParse("1Gi")},
 			},
@@ -113,15 +130,11 @@ func TestApplierEngineEnablesPodMonitorWhenCRDInstalled(t *testing.T) {
 	engine := &everestv1alpha1.DatabaseEngine{
 		Status: everestv1alpha1.DatabaseEngineStatus{
 			AvailableVersions: everestv1alpha1.Versions{
-				Engine: everestv1alpha1.ComponentsMap{"16.4": {ImagePath: "registry.example/postgresql:16.4"}},
+				Engine: everestv1alpha1.ComponentsMap{testEngineVersion: {ImagePath: testEngineImage}},
 			},
 		},
 	}
-	crd := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "apiextensions.k8s.io/v1",
-		"kind":       "CustomResourceDefinition",
-		"metadata":   map[string]any{"name": "podmonitors.monitoring.coreos.com"},
-	}}
+	crd := crdObject("podmonitors.monitoring.coreos.com")
 	c := fake.NewClientBuilder().WithObjects(crd).Build()
 	provider := &Provider{
 		Unstructured:    &unstructured.Unstructured{Object: map[string]any{}},
@@ -141,9 +154,9 @@ func TestApplierEngineInitdbOwner(t *testing.T) {
 	t.Parallel()
 	newDB := func(secretName string) *everestv1alpha1.DatabaseCluster {
 		return &everestv1alpha1.DatabaseCluster{
-			ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "databases"},
+			ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testNamespace},
 			Spec: everestv1alpha1.DatabaseClusterSpec{Engine: everestv1alpha1.Engine{
-				Type: everestv1alpha1.DatabaseEnginePostgresql, Version: "16.4", Replicas: 1,
+				Type: everestv1alpha1.DatabaseEnginePostgresql, Version: testEngineVersion, Replicas: 1,
 				Storage:         everestv1alpha1.Storage{Size: resource.MustParse("1Gi")},
 				UserSecretsName: secretName,
 			}},
@@ -152,65 +165,54 @@ func TestApplierEngineInitdbOwner(t *testing.T) {
 	engine := &everestv1alpha1.DatabaseEngine{
 		Status: everestv1alpha1.DatabaseEngineStatus{
 			AvailableVersions: everestv1alpha1.Versions{
-				Engine: everestv1alpha1.ComponentsMap{"16.4": {ImagePath: "registry.example/postgresql:16.4"}},
+				Engine: everestv1alpha1.ComponentsMap{testEngineVersion: {ImagePath: testEngineImage}},
 			},
 		},
 	}
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 
-	secret := func(name, username string) *corev1.Secret {
-		return &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "databases"},
+	// runEngine chạy bước Engine() với userSecretsName trỏ vào một Secret có username cho trước.
+	runEngine := func(t *testing.T, secretName, username string) (*Provider, error) {
+		t.Helper()
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: testNamespace},
 			Data:       map[string][]byte{corev1.BasicAuthUsernameKey: []byte(username)},
 		}
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+		provider := &Provider{
+			Unstructured:    &unstructured.Unstructured{Object: map[string]any{}},
+			ProviderOptions: providers.ProviderOptions{DB: newDB(secretName), DBEngine: engine, C: c},
+		}
+		a := &applier{Provider: provider, ctx: context.Background()}
+		require.NoError(t, a.ResetDefaults())
+		return provider, a.Engine()
 	}
 
 	t.Run("owner lay tu secret", func(t *testing.T) {
 		t.Parallel()
-		db := newDB("app-creds")
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret("app-creds", "dbadmin")).Build()
-		provider := &Provider{
-			Unstructured:    &unstructured.Unstructured{Object: map[string]any{}},
-			ProviderOptions: providers.ProviderOptions{DB: db, DBEngine: engine, C: c},
-		}
-		a := &applier{Provider: provider, ctx: context.Background()}
-		require.NoError(t, a.ResetDefaults())
-		require.NoError(t, a.Engine())
+		provider, err := runEngine(t, testUserSecret, "dbadmin")
+		require.NoError(t, err)
 		assert.Equal(t, "dbadmin", mustNested(t, provider.Object, "spec", "bootstrap", "initdb", "owner"))
 		assert.Equal(t, "app", mustNested(t, provider.Object, "spec", "bootstrap", "initdb", "database"))
 	})
 
 	t.Run("tu choi superuser", func(t *testing.T) {
 		t.Parallel()
-		db := newDB("su-creds")
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret("su-creds", "postgres")).Build()
-		provider := &Provider{
-			Unstructured:    &unstructured.Unstructured{Object: map[string]any{}},
-			ProviderOptions: providers.ProviderOptions{DB: db, DBEngine: engine, C: c},
-		}
-		a := &applier{Provider: provider, ctx: context.Background()}
-		require.NoError(t, a.ResetDefaults())
-		require.ErrorContains(t, a.Engine(), "superuser")
+		_, err := runEngine(t, "su-creds", "postgres")
+		require.ErrorContains(t, err, "superuser")
 	})
 
 	t.Run("thieu key username", func(t *testing.T) {
 		t.Parallel()
-		db := newDB("empty-creds")
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret("empty-creds", "")).Build()
-		provider := &Provider{
-			Unstructured:    &unstructured.Unstructured{Object: map[string]any{}},
-			ProviderOptions: providers.ProviderOptions{DB: db, DBEngine: engine, C: c},
-		}
-		a := &applier{Provider: provider, ctx: context.Background()}
-		require.NoError(t, a.ResetDefaults())
-		require.ErrorContains(t, a.Engine(), "username")
+		_, err := runEngine(t, "empty-creds", "")
+		require.ErrorContains(t, err, "username")
 	})
 }
 
 func TestStatusReady(t *testing.T) {
 	t.Parallel()
-	db := &everestv1alpha1.DatabaseCluster{ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "databases"}}
+	db := &everestv1alpha1.DatabaseCluster{ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testNamespace}}
 	cluster := &unstructured.Unstructured{Object: map[string]any{
 		"spec": map[string]any{"instances": int64(3)},
 		"status": map[string]any{
@@ -249,10 +251,10 @@ func TestProxyCreatesPooler(t *testing.T) {
 	}
 	replicas := int32(2)
 	db := &everestv1alpha1.DatabaseCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "databases"},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testNamespace},
 		Spec: everestv1alpha1.DatabaseClusterSpec{
 			Engine: everestv1alpha1.Engine{
-				Type: everestv1alpha1.DatabaseEnginePostgresql, Version: "16.4",
+				Type: everestv1alpha1.DatabaseEnginePostgresql, Version: testEngineVersion,
 			},
 			Proxy: everestv1alpha1.Proxy{
 				Type: everestv1alpha1.ProxyTypePGBouncer, Replicas: &replicas,
@@ -264,7 +266,7 @@ func TestProxyCreatesPooler(t *testing.T) {
 			AvailableVersions: everestv1alpha1.Versions{
 				Proxy: map[everestv1alpha1.ProxyType]everestv1alpha1.ComponentsMap{
 					everestv1alpha1.ProxyTypePGBouncer: {
-						"16.4": {ImagePath: "ghcr.io/cloudnative-pg/pgbouncer:1.25.1@sha256:abc"},
+						testEngineVersion: {ImagePath: "ghcr.io/cloudnative-pg/pgbouncer:1.25.1@sha256:abc"},
 					},
 				},
 			},
@@ -280,8 +282,8 @@ func TestProxyCreatesPooler(t *testing.T) {
 	pooler := &unstructured.Unstructured{Object: map[string]any{}}
 	pooler.SetGroupVersionKind(PoolerGVK)
 	require.NoError(t, c.Get(context.Background(),
-		types.NamespacedName{Namespace: "databases", Name: testPoolerName}, pooler))
-	assert.Equal(t, "orders", mustNested(t, pooler.Object, "spec", "cluster", "name"))
+		types.NamespacedName{Namespace: testNamespace, Name: testPoolerName}, pooler))
+	assert.Equal(t, testClusterName, mustNested(t, pooler.Object, "spec", "cluster", fieldName))
 	assert.Equal(t, "rw", mustNested(t, pooler.Object, "spec", "type"))
 	assert.Equal(t, int64(2), mustNested(t, pooler.Object, "spec", "instances"))
 	// Image phải tới từ catalog, không ghép chuỗi.
@@ -293,7 +295,7 @@ func TestProxyCreatesPooler(t *testing.T) {
 	// CNPG không tự tạo PDB cho Pooler nên Everest phải tạo.
 	pdb := &policyv1.PodDisruptionBudget{}
 	require.NoError(t, c.Get(context.Background(),
-		types.NamespacedName{Namespace: "databases", Name: testPoolerName}, pdb))
+		types.NamespacedName{Namespace: testNamespace, Name: testPoolerName}, pdb))
 
 	// Hợp đồng kết nối chuyển sang pooler.
 	status, _, err := provider.Status(context.Background())
@@ -314,12 +316,12 @@ func TestProxyDeletesPoolerWhenDisabled(t *testing.T) {
 	listGVK.Kind += listKindSuffix
 	scheme.AddKnownTypeWithName(listGVK, &unstructured.UnstructuredList{})
 
-	existing := newUnstructured(PoolerGVK, "databases", testPoolerName)
+	existing := newUnstructured(PoolerGVK, testNamespace, testPoolerName)
 	existingPDB := &policyv1.PodDisruptionBudget{
-		ObjectMeta: metav1.ObjectMeta{Name: testPoolerName, Namespace: "databases"},
+		ObjectMeta: metav1.ObjectMeta{Name: testPoolerName, Namespace: testNamespace},
 	}
 	db := &everestv1alpha1.DatabaseCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "databases"},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testNamespace},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(db, existing, existingPDB).Build()
 	provider := &Provider{
@@ -331,13 +333,13 @@ func TestProxyDeletesPoolerWhenDisabled(t *testing.T) {
 	gone := &unstructured.Unstructured{Object: map[string]any{}}
 	gone.SetGroupVersionKind(PoolerGVK)
 	err := c.Get(context.Background(),
-		types.NamespacedName{Namespace: "databases", Name: testPoolerName}, gone)
+		types.NamespacedName{Namespace: testNamespace, Name: testPoolerName}, gone)
 	require.Error(t, err, "Pooler phải bị xoá khi tắt")
 
 	// PDB cũng phải biến mất: owner của nó là DatabaseCluster nên GC không dọn hộ.
 	pdb := &policyv1.PodDisruptionBudget{}
 	err = c.Get(context.Background(),
-		types.NamespacedName{Namespace: "databases", Name: testPoolerName}, pdb)
+		types.NamespacedName{Namespace: testNamespace, Name: testPoolerName}, pdb)
 	require.Error(t, err, "PDB của pooler phải bị xoá khi tắt")
 
 	status, _, err := provider.Status(context.Background())
@@ -366,7 +368,7 @@ func TestProxyRejectsFreeFormConfig(t *testing.T) {
 
 func TestBarmanObjectStoreS3(t *testing.T) {
 	t.Parallel()
-	db := &everestv1alpha1.DatabaseCluster{ObjectMeta: metav1.ObjectMeta{Name: "orders", UID: types.UID("uid-1")}}
+	db := &everestv1alpha1.DatabaseCluster{ObjectMeta: metav1.ObjectMeta{Name: testClusterName, UID: types.UID("uid-1")}}
 	storage := &everestv1alpha1.BackupStorage{Spec: everestv1alpha1.BackupStorageSpec{
 		Type: everestv1alpha1.BackupStorageTypeS3, Bucket: "backups", EndpointURL: "https://s3.example",
 		CredentialsSecretName: "backup-creds",
@@ -376,7 +378,7 @@ func TestBarmanObjectStoreS3(t *testing.T) {
 	assert.Equal(t, "s3://backups/orders/uid-1", config["destinationPath"])
 	assert.Equal(t, "https://s3.example", config["endpointURL"])
 	credentials := config["s3Credentials"].(map[string]any)
-	assert.Equal(t, map[string]any{"name": "backup-creds", "key": "AWS_ACCESS_KEY_ID"}, credentials["accessKeyId"])
+	assert.Equal(t, map[string]any{fieldName: "backup-creds", fieldKey: "AWS_ACCESS_KEY_ID"}, credentials["accessKeyId"])
 }
 
 // [CUSTOM CNPG] Barman chỉ nhận region qua secret reference. Region PHẢI trỏ vào Secret do Everest
@@ -384,7 +386,7 @@ func TestBarmanObjectStoreS3(t *testing.T) {
 // nên trỏ nhầm làm WAL archiving chết với "missing key AWS_REGION, inside secret".
 func TestBarmanObjectStoreRegionUsesOwnedSecret(t *testing.T) {
 	t.Parallel()
-	db := &everestv1alpha1.DatabaseCluster{ObjectMeta: metav1.ObjectMeta{Name: "orders", UID: types.UID("uid-1")}}
+	db := &everestv1alpha1.DatabaseCluster{ObjectMeta: metav1.ObjectMeta{Name: testClusterName, UID: types.UID("uid-1")}}
 	storage := &everestv1alpha1.BackupStorage{Spec: everestv1alpha1.BackupStorageSpec{
 		Type: everestv1alpha1.BackupStorageTypeS3, Bucket: "backups", Region: "us-east-1",
 		CredentialsSecretName: "backup-creds",
@@ -395,19 +397,21 @@ func TestBarmanObjectStoreRegionUsesOwnedSecret(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(
 		t,
-		map[string]any{"name": "orders-s3-region", "key": regionSecretKey},
+		map[string]any{fieldName: "orders-s3-region", fieldKey: regionSecretKey},
 		credentials["region"],
 	)
 	// Access key vẫn lấy từ secret của người dùng.
 	assert.Equal(
 		t,
-		map[string]any{"name": "backup-creds", "key": "AWS_ACCESS_KEY_ID"},
+		map[string]any{fieldName: "backup-creds", fieldKey: "AWS_ACCESS_KEY_ID"},
 		credentials["accessKeyId"],
 	)
 }
 
-func TestBackupCreatesScheduledBackup(t *testing.T) {
-	t.Parallel()
+// newScheduledBackupFixture dựng scheme có ScheduledBackup/ObjectStore, một DatabaseCluster với lịch
+// backup hằng ngày và BackupStorage S3 mà lịch đó trỏ tới.
+func newScheduledBackupFixture(t *testing.T) (*runtime.Scheme, *everestv1alpha1.DatabaseCluster, *everestv1alpha1.BackupStorage) {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, everestv1alpha1.AddToScheme(scheme))
 	for _, gvk := range []schema.GroupVersionKind{ScheduledBackupGVK, ObjectStoreGVK} {
@@ -417,21 +421,23 @@ func TestBackupCreatesScheduledBackup(t *testing.T) {
 		scheme.AddKnownTypeWithName(listGVK, &unstructured.UnstructuredList{})
 	}
 	db := &everestv1alpha1.DatabaseCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "databases", UID: types.UID("uid-1")},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testNamespace, UID: types.UID("uid-1")},
 		Spec: everestv1alpha1.DatabaseClusterSpec{Backup: everestv1alpha1.Backup{Schedules: []everestv1alpha1.BackupSchedule{{
 			Name: "daily", Enabled: true, Schedule: "0 2 * * *", BackupStorageName: "s3",
 		}}}},
 	}
 	storage := &everestv1alpha1.BackupStorage{
-		ObjectMeta: metav1.ObjectMeta{Name: "s3", Namespace: "databases"},
+		ObjectMeta: metav1.ObjectMeta{Name: "s3", Namespace: testNamespace},
 		Spec:       everestv1alpha1.BackupStorageSpec{Type: everestv1alpha1.BackupStorageTypeS3, Bucket: "backups", CredentialsSecretName: "creds"},
 	}
+	return scheme, db, storage
+}
+
+func TestBackupCreatesScheduledBackup(t *testing.T) {
+	t.Parallel()
+	scheme, db, storage := newScheduledBackupFixture(t)
 	// Barman Cloud Plugin phải có mặt thì Everest mới dựng được ObjectStore.
-	pluginCRD := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "apiextensions.k8s.io/v1",
-		"kind":       "CustomResourceDefinition",
-		"metadata":   map[string]any{"name": consts.BarmanCloudObjectStoreCRDName},
-	}}
+	pluginCRD := crdObject(consts.BarmanCloudObjectStoreCRDName)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(db, storage, pluginCRD).Build()
 	provider := &Provider{
 		Unstructured:    &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{}}},
@@ -440,14 +446,14 @@ func TestBackupCreatesScheduledBackup(t *testing.T) {
 	require.NoError(t, (&applier{Provider: provider, ctx: context.Background()}).Backup())
 	created := &unstructured.Unstructured{Object: map[string]any{}}
 	created.SetGroupVersionKind(ScheduledBackupGVK)
-	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "databases", Name: "orders-daily"}, created))
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "orders-daily"}, created))
 	assert.Equal(t, "0 0 2 * * *", mustNested(t, created.Object, "spec", "schedule"))
 	assert.Equal(t, "none", mustNested(t, created.Object, "spec", "backupOwnerReference"))
-	assert.Equal(t, "orders", mustNested(t, created.Object, "spec", "cluster", "name"))
+	assert.Equal(t, testClusterName, mustNested(t, created.Object, "spec", "cluster", fieldName))
 	// [CUSTOM CNPG] Base backup do Barman Cloud Plugin chụp, không phải interface in-tree.
 	assert.Equal(t, "plugin", mustNested(t, created.Object, "spec", "method"))
 	assert.Equal(t, consts.BarmanCloudPluginName,
-		mustNested(t, created.Object, "spec", "pluginConfiguration", "name"))
+		mustNested(t, created.Object, "spec", "pluginConfiguration", fieldName))
 
 	// Cluster trỏ tới ObjectStore qua spec.plugins và KHÔNG được còn spec.backup.barmanObjectStore:
 	// CNPG chặn cứng việc bật isWALArchiver khi cấu hình in-tree còn tồn tại.
@@ -456,7 +462,7 @@ func TestBackupCreatesScheduledBackup(t *testing.T) {
 	require.Len(t, plugins, 1)
 	plugin, ok := plugins[0].(map[string]any)
 	require.True(t, ok)
-	assert.Equal(t, consts.BarmanCloudPluginName, plugin["name"])
+	assert.Equal(t, consts.BarmanCloudPluginName, plugin[fieldName])
 	assert.Equal(t, true, plugin["isWALArchiver"])
 	parameters, ok := plugin["parameters"].(map[string]any)
 	require.True(t, ok)
@@ -469,7 +475,7 @@ func TestBackupCreatesScheduledBackup(t *testing.T) {
 	store := &unstructured.Unstructured{Object: map[string]any{}}
 	store.SetGroupVersionKind(ObjectStoreGVK)
 	require.NoError(t, c.Get(context.Background(),
-		types.NamespacedName{Namespace: "databases", Name: "orders-s3"}, store))
+		types.NamespacedName{Namespace: testNamespace, Name: "orders-s3"}, store))
 	assert.Equal(t, "s3://backups/orders/uid-1",
 		mustNested(t, store.Object, "spec", "configuration", "destinationPath"))
 }
@@ -490,22 +496,22 @@ func TestBackupObjectStorePolicyFromBackupStorage(t *testing.T) {
 	}
 	schedules := []everestv1alpha1.BackupSchedule{{Name: "daily", Enabled: true, Schedule: "0 2 * * *", BackupStorageName: "s3"}}
 	source := &everestv1alpha1.DatabaseCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "databases", UID: types.UID("uid-1")},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testNamespace, UID: types.UID("uid-1")},
 		Spec:       everestv1alpha1.DatabaseClusterSpec{Backup: everestv1alpha1.Backup{Schedules: schedules}},
 	}
 	restored := &everestv1alpha1.DatabaseCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "orders-restored", Namespace: "databases", UID: types.UID("uid-2")},
+		ObjectMeta: metav1.ObjectMeta{Name: "orders-restored", Namespace: testNamespace, UID: types.UID("uid-2")},
 		Spec: everestv1alpha1.DatabaseClusterSpec{
 			Backup:     everestv1alpha1.Backup{Schedules: schedules},
 			DataSource: &everestv1alpha1.DataSource{DBClusterBackupName: "orders-backup"},
 		},
 	}
 	backup := &everestv1alpha1.DatabaseClusterBackup{
-		ObjectMeta: metav1.ObjectMeta{Name: "orders-backup", Namespace: "databases"},
-		Spec:       everestv1alpha1.DatabaseClusterBackupSpec{DBClusterName: "orders", BackupStorageName: "s3"},
+		ObjectMeta: metav1.ObjectMeta{Name: "orders-backup", Namespace: testNamespace},
+		Spec:       everestv1alpha1.DatabaseClusterBackupSpec{DBClusterName: testClusterName, BackupStorageName: "s3"},
 	}
 	storage := &everestv1alpha1.BackupStorage{
-		ObjectMeta: metav1.ObjectMeta{Name: "s3", Namespace: "databases"},
+		ObjectMeta: metav1.ObjectMeta{Name: "s3", Namespace: testNamespace},
 		Spec: everestv1alpha1.BackupStorageSpec{
 			Type: everestv1alpha1.BackupStorageTypeS3, Bucket: "backups", CredentialsSecretName: "creds",
 			ObjectStore: &runtime.RawExtension{Raw: []byte(`{
@@ -518,16 +524,12 @@ func TestBackupObjectStorePolicyFromBackupStorage(t *testing.T) {
 			}`)},
 		},
 	}
-	pluginCRD := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "apiextensions.k8s.io/v1",
-		"kind":       "CustomResourceDefinition",
-		"metadata":   map[string]any{"name": consts.BarmanCloudObjectStoreCRDName},
-	}}
+	pluginCRD := crdObject(consts.BarmanCloudObjectStoreCRDName)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(source, restored, backup, storage, pluginCRD).Build()
 	getStore := func(name string) map[string]any {
 		store := &unstructured.Unstructured{Object: map[string]any{}}
 		store.SetGroupVersionKind(ObjectStoreGVK)
-		require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "databases", Name: name}, store))
+		require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: name}, store))
 		return store.Object
 	}
 
@@ -582,24 +584,7 @@ func TestBackupObjectStorePolicyFromBackupStorage(t *testing.T) {
 // phải báo thẳng rằng plugin chưa được cài.
 func TestBackupRequiresBarmanCloudPlugin(t *testing.T) {
 	t.Parallel()
-	scheme := runtime.NewScheme()
-	require.NoError(t, everestv1alpha1.AddToScheme(scheme))
-	for _, gvk := range []schema.GroupVersionKind{ScheduledBackupGVK, ObjectStoreGVK} {
-		scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
-		listGVK := gvk
-		listGVK.Kind += listKindSuffix
-		scheme.AddKnownTypeWithName(listGVK, &unstructured.UnstructuredList{})
-	}
-	db := &everestv1alpha1.DatabaseCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "databases", UID: types.UID("uid-1")},
-		Spec: everestv1alpha1.DatabaseClusterSpec{Backup: everestv1alpha1.Backup{Schedules: []everestv1alpha1.BackupSchedule{{
-			Name: "daily", Enabled: true, Schedule: "0 2 * * *", BackupStorageName: "s3",
-		}}}},
-	}
-	storage := &everestv1alpha1.BackupStorage{
-		ObjectMeta: metav1.ObjectMeta{Name: "s3", Namespace: "databases"},
-		Spec:       everestv1alpha1.BackupStorageSpec{Type: everestv1alpha1.BackupStorageTypeS3, Bucket: "backups", CredentialsSecretName: "creds"},
-	}
+	scheme, db, storage := newScheduledBackupFixture(t)
 	// Không có CRD của plugin trong cụm.
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(db, storage).Build()
 	provider := &Provider{
@@ -617,9 +602,9 @@ func TestStatusResizingVolumes(t *testing.T) {
 	// the provider should expose that transient state through Everest status.
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
-	db := &everestv1alpha1.DatabaseCluster{ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "databases"}}
+	db := &everestv1alpha1.DatabaseCluster{ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testNamespace}}
 	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "orders-1", Namespace: "databases", Labels: map[string]string{"cnpg.io/cluster": "orders"}},
+		ObjectMeta: metav1.ObjectMeta{Name: testInstanceName, Namespace: testNamespace, Labels: map[string]string{testClusterLabel: testClusterName}},
 		Status: corev1.PersistentVolumeClaimStatus{Conditions: []corev1.PersistentVolumeClaimCondition{{
 			Type: corev1.PersistentVolumeClaimResizing, Status: corev1.ConditionTrue,
 		}}},
@@ -640,12 +625,12 @@ func TestStatusResizeCompletedReturnsToReady(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	db := &everestv1alpha1.DatabaseCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "databases"},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testNamespace},
 		Status:     everestv1alpha1.DatabaseClusterStatus{Status: everestv1alpha1.AppStateResizingVolumes},
 	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "orders-1", Namespace: "databases", Labels: map[string]string{"cnpg.io/cluster": "orders"},
+			Name: testInstanceName, Namespace: testNamespace, Labels: map[string]string{testClusterLabel: testClusterName},
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{Resources: corev1.VolumeResourceRequirements{
 			Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("20Gi")},
@@ -677,11 +662,11 @@ func TestStatusResizeFailureUsesCNPGLabels(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	db := &everestv1alpha1.DatabaseCluster{ObjectMeta: metav1.ObjectMeta{
-		Name: "orders", Namespace: "databases", Generation: 2,
+		Name: testClusterName, Namespace: testNamespace, Generation: 2,
 	}}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "orders-1", Namespace: "databases", Labels: map[string]string{"cnpg.io/cluster": "orders"},
+			Name: testInstanceName, Namespace: testNamespace, Labels: map[string]string{testClusterLabel: testClusterName},
 		},
 		Status: corev1.PersistentVolumeClaimStatus{Conditions: []corev1.PersistentVolumeClaimCondition{{
 			Type: corev1.PersistentVolumeClaimControllerResizeError, Status: corev1.ConditionTrue, Message: "quota exceeded",
@@ -740,7 +725,7 @@ func TestApplierPodSchedulingPolicyUsesCNPGSchema(t *testing.T) {
 func TestApplierEnginePreventsStorageShrink(t *testing.T) {
 	t.Parallel()
 	db := &everestv1alpha1.DatabaseCluster{Spec: everestv1alpha1.DatabaseClusterSpec{Engine: everestv1alpha1.Engine{
-		Version: "16.4", Replicas: 3, Storage: everestv1alpha1.Storage{Size: resource.MustParse("10Gi")},
+		Version: testEngineVersion, Replicas: 3, Storage: everestv1alpha1.Storage{Size: resource.MustParse("10Gi")},
 	}}}
 	provider := &Provider{
 		Unstructured: &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{
@@ -757,7 +742,7 @@ func TestApplierEnginePreventsStorageShrink(t *testing.T) {
 
 func TestValidateVersionChange(t *testing.T) {
 	t.Parallel()
-	require.NoError(t, validateVersionChange("ghcr.io/cloudnative-pg/postgresql:16.3", "16.4"))
+	require.NoError(t, validateVersionChange("ghcr.io/cloudnative-pg/postgresql:16.3", testEngineVersion))
 	require.ErrorContains(t, validateVersionChange("ghcr.io/cloudnative-pg/postgresql:16.4", "16.3"), "downgrade")
 	require.ErrorContains(t, validateVersionChange("ghcr.io/cloudnative-pg/postgresql:16.4", "17.1"), "minor versions")
 

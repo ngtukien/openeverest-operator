@@ -58,6 +58,13 @@ const (
 	superuserName = "postgres"
 	// Khoá chứa region trong Secret do Everest sở hữu.
 	regionSecretKey = "AWS_REGION"
+	// Các khoá của Cluster.spec / ObjectStore.spec dạng unstructured.
+	fieldConfiguration = "configuration"
+	fieldInstances     = "instances"
+	fieldStorage       = "storage"
+	fieldResources     = "resources"
+	// Lý do chung khi chặn *AdditionalCommandArgs trong spec.objectStore.
+	reasonRawBarmanArgs = "would bypass the BackupStorage; raw barman-cloud arguments are not allowed"
 )
 
 // OwnedObjectStorePaths là phần "backup Ở ĐÂU" của ObjectStore.spec: Everest sinh từ các field có
@@ -67,20 +74,20 @@ var OwnedObjectStorePaths = []struct {
 	Path   []string
 	Reason string
 }{
-	{Path: []string{"configuration", "destinationPath"}, Reason: "is generated from the BackupStorage bucket plus a per-cluster prefix"},
-	{Path: []string{"configuration", "endpointURL"}, Reason: "is generated from the BackupStorage"},
-	{Path: []string{"configuration", "endpointCA"}, Reason: "is generated from the BackupStorage"},
-	{Path: []string{"configuration", "s3Credentials"}, Reason: "is generated from the BackupStorage credentials and region"},
-	{Path: []string{"configuration", "azureCredentials"}, Reason: "is generated from the BackupStorage credentials"},
-	{Path: []string{"configuration", "googleCredentials"}, Reason: "is generated from the BackupStorage credentials"},
+	{Path: []string{fieldConfiguration, "destinationPath"}, Reason: "is generated from the BackupStorage bucket plus a per-cluster prefix"},
+	{Path: []string{fieldConfiguration, "endpointURL"}, Reason: "is generated from the BackupStorage"},
+	{Path: []string{fieldConfiguration, "endpointCA"}, Reason: "is generated from the BackupStorage"},
+	{Path: []string{fieldConfiguration, "s3Credentials"}, Reason: "is generated from the BackupStorage credentials and region"},
+	{Path: []string{fieldConfiguration, "azureCredentials"}, Reason: "is generated from the BackupStorage credentials"},
+	{Path: []string{fieldConfiguration, "googleCredentials"}, Reason: "is generated from the BackupStorage credentials"},
 	// serverName quyết định thư mục con trong bucket; restore của Everest tìm backup theo tên cụm.
-	{Path: []string{"configuration", "serverName"}, Reason: "is the cluster name; Everest restores rely on it"},
+	{Path: []string{fieldConfiguration, "serverName"}, Reason: "is the cluster name; Everest restores rely on it"},
 	// Tham số dòng lệnh thô cho barman-cloud: `--endpoint-url` ở đây là đổi đích backup, tức đi
 	// vòng qua BackupStorage.
-	{Path: []string{"configuration", "wal", "archiveAdditionalCommandArgs"}, Reason: "would bypass the BackupStorage; raw barman-cloud arguments are not allowed"},
-	{Path: []string{"configuration", "wal", "restoreAdditionalCommandArgs"}, Reason: "would bypass the BackupStorage; raw barman-cloud arguments are not allowed"},
-	{Path: []string{"configuration", "data", "additionalCommandArgs"}, Reason: "would bypass the BackupStorage; raw barman-cloud arguments are not allowed"},
-	{Path: []string{"configuration", "data", "restoreAdditionalCommandArgs"}, Reason: "would bypass the BackupStorage; raw barman-cloud arguments are not allowed"},
+	{Path: []string{fieldConfiguration, "wal", "archiveAdditionalCommandArgs"}, Reason: reasonRawBarmanArgs},
+	{Path: []string{fieldConfiguration, "wal", "restoreAdditionalCommandArgs"}, Reason: reasonRawBarmanArgs},
+	{Path: []string{fieldConfiguration, "data", "additionalCommandArgs"}, Reason: reasonRawBarmanArgs},
+	{Path: []string{fieldConfiguration, "data", "restoreAdditionalCommandArgs"}, Reason: reasonRawBarmanArgs},
 }
 
 // regionSecretName sinh tên Secret chứa region cho một ObjectStore.
@@ -154,7 +161,7 @@ func (a *applier) reconcileObjectStore(
 				storageName, strings.Join(owned.Path, "."), owned.Reason)
 		}
 	}
-	spec := map[string]any{"configuration": configuration}
+	spec := map[string]any{fieldConfiguration: configuration}
 	if err := mergeSpecMap(spec, overrides, fmt.Sprintf("BackupStorage %q spec.objectStore", storageName)); err != nil {
 		return err
 	}

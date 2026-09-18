@@ -51,6 +51,25 @@ const (
 	dbcTestCNPGImage     = "ghcr.io/cloudnative-pg/postgresql:16.4-standard-bookworm"
 )
 
+// [CUSTOM CNPG] newCNPGTestEngine dựng DatabaseEngine của provider cloudnative-pg. Trên cụm thật,
+// danh sách version do DatabaseEngineReconciler đổ vào từ ClusterImageCatalog.
+func newCNPGTestEngine() *everestv1alpha1.DatabaseEngine {
+	return &everestv1alpha1.DatabaseEngine{
+		ObjectMeta: metav1.ObjectMeta{Name: consts.CNPGDeploymentName, Namespace: dbcTestDbNamespace},
+		Spec:       everestv1alpha1.DatabaseEngineSpec{Type: everestv1alpha1.DatabaseEnginePostgresql},
+		Status: everestv1alpha1.DatabaseEngineStatus{
+			AvailableVersions: everestv1alpha1.Versions{
+				Engine: everestv1alpha1.ComponentsMap{
+					dbcTestCNPGDbVersion: {
+						ImagePath: dbcTestCNPGImage,
+						Status:    everestv1alpha1.DBEngineComponentRecommended,
+					},
+				},
+			},
+		},
+	}
+}
+
 func TestCheckJSONKeyExists(t *testing.T) {
 	t.Parallel()
 	testCases := []struct {
@@ -175,27 +194,7 @@ func TestDatabaseClusterValidator_ValidateCreate(t *testing.T) { //nolint:mainti
 				},
 			},
 		},
-		// [CUSTOM CNPG] DatabaseEngine của provider cloudnative-pg. Trên cụm thật, danh sách
-		// version ở đây do DatabaseEngineReconciler đổ vào từ ClusterImageCatalog.
-		&everestv1alpha1.DatabaseEngine{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      consts.CNPGDeploymentName,
-				Namespace: dbcTestDbNamespace,
-			},
-			Spec: everestv1alpha1.DatabaseEngineSpec{
-				Type: everestv1alpha1.DatabaseEnginePostgresql,
-			},
-			Status: everestv1alpha1.DatabaseEngineStatus{
-				AvailableVersions: everestv1alpha1.Versions{
-					Engine: everestv1alpha1.ComponentsMap{
-						dbcTestCNPGDbVersion: {
-							ImagePath: dbcTestCNPGImage,
-							Status:    everestv1alpha1.DBEngineComponentRecommended,
-						},
-					},
-				},
-			},
-		},
+		newCNPGTestEngine(),
 		&everestv1alpha1.DatabaseEngine{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      consts.PXCDeploymentName,
@@ -545,27 +544,7 @@ func TestDatabaseClusterValidator_ValidateUpdate(t *testing.T) {
 				},
 			},
 		},
-		// [CUSTOM CNPG] DatabaseEngine của provider cloudnative-pg. Trên cụm thật, danh sách
-		// version ở đây do DatabaseEngineReconciler đổ vào từ ClusterImageCatalog.
-		&everestv1alpha1.DatabaseEngine{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      consts.CNPGDeploymentName,
-				Namespace: dbcTestDbNamespace,
-			},
-			Spec: everestv1alpha1.DatabaseEngineSpec{
-				Type: everestv1alpha1.DatabaseEnginePostgresql,
-			},
-			Status: everestv1alpha1.DatabaseEngineStatus{
-				AvailableVersions: everestv1alpha1.Versions{
-					Engine: everestv1alpha1.ComponentsMap{
-						dbcTestCNPGDbVersion: {
-							ImagePath: dbcTestCNPGImage,
-							Status:    everestv1alpha1.DBEngineComponentRecommended,
-						},
-					},
-				},
-			},
-		},
+		newCNPGTestEngine(),
 		&everestv1alpha1.DatabaseEngine{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      consts.PXCDeploymentName,
@@ -813,22 +792,7 @@ func TestDatabaseClusterValidator_CNPGCreateCapabilityGuards(t *testing.T) {
 	utilruntime.Must(everestv1alpha1.AddToScheme(scheme))
 	crd := &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: consts.CNPGClusterCRDName}}
 
-	// [CUSTOM CNPG] Danh sách version khả dụng của provider cloudnative-pg. Trên cụm thật,
-	// DatabaseEngineReconciler đổ nội dung này vào từ ClusterImageCatalog.
-	cnpgEngine := &everestv1alpha1.DatabaseEngine{
-		ObjectMeta: metav1.ObjectMeta{Name: consts.CNPGDeploymentName, Namespace: dbcTestDbNamespace},
-		Spec:       everestv1alpha1.DatabaseEngineSpec{Type: everestv1alpha1.DatabaseEnginePostgresql},
-		Status: everestv1alpha1.DatabaseEngineStatus{
-			AvailableVersions: everestv1alpha1.Versions{
-				Engine: everestv1alpha1.ComponentsMap{
-					dbcTestCNPGDbVersion: {
-						ImagePath: dbcTestCNPGImage,
-						Status:    everestv1alpha1.DBEngineComponentRecommended,
-					},
-				},
-			},
-		},
-	}
+	cnpgEngine := newCNPGTestEngine()
 
 	newDB := func() *everestv1alpha1.DatabaseCluster {
 		return &everestv1alpha1.DatabaseCluster{

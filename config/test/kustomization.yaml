@@ -57,6 +57,7 @@ replacements:
     - webhooks.[name=vsplithorizondnsconfig-v1alpha1.enginefeatures.everest.percona.com].clientConfig.caBundle
     - webhooks.[name=vdatabaseclusterrestore-v1alpha1.everest.percona.com].clientConfig.caBundle
     - webhooks.[name=vdatabaseclusterbackup-v1alpha1.everest.percona.com].clientConfig.caBundle
+    - webhooks.[name=vbackupstorage-v1alpha1.everest.percona.com].clientConfig.caBundle
     options:
       create: true
   - select:

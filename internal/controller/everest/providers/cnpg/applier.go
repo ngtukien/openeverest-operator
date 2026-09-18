@@ -126,20 +126,20 @@ func (a *applier) Engine() error {
 		)
 	}
 	spec := map[string]any{
-		"instances": int64(engine.Replicas),
-		"imageName": imageName,
-		"storage": map[string]any{
+		fieldInstances: int64(engine.Replicas),
+		"imageName":    imageName,
+		fieldStorage: map[string]any{
 			"size": engine.Storage.Size.String(),
 		},
-		"resources": resources,
+		fieldResources: resources,
 	}
 	if engine.Storage.Class != nil {
-		if storage, ok := spec["storage"].(map[string]any); ok {
+		if storage, ok := spec[fieldStorage].(map[string]any); ok {
 			storage["storageClass"] = *engine.Storage.Class
 		}
 	}
 	setStorageSize := func(size resource.Quantity, storageClass *string) {
-		storage, ok := spec["storage"].(map[string]any)
+		storage, ok := spec[fieldStorage].(map[string]any)
 		if !ok {
 			return
 		}
@@ -239,7 +239,7 @@ const cnpgReloadLabel = "cnpg.io/reload"
 
 // [CUSTOM CNPG] ensureSecretReload gắn label cnpg.io/reload lên Secret userSecretsName.
 //
-// managed.roles chỉ giữ password khớp Secret nếu CNPG BIẾT Secret đã đổi. CNPG chỉ watch Secret do
+// Trường managed.roles chỉ giữ password khớp Secret nếu CNPG BIẾT Secret đã đổi. CNPG chỉ watch Secret do
 // chính Cluster sở hữu hoặc mang label này; Secret do người dùng tạo thì không có cả hai, nên đổi
 // password xong PostgreSQL vẫn giữ password cũ cho tới khi một sự kiện khác làm Cluster reconcile
 // lại — đã bắt được trên lab: 90 giây sau khi đổi Secret, password cũ vẫn đăng nhập được.
@@ -485,7 +485,8 @@ func (a *applier) Backup() error {
 			storageNames[schedule.BackupStorageName] = struct{}{}
 		}
 		if schedule.RetentionCopies != 0 {
-			return errors.New("CloudNativePG does not support retentionCopies; the platform sets a time-based retentionPolicy such as \"7d\" in the BackupStorage's spec.objectStore")
+			return errors.New("CloudNativePG does not support retentionCopies; the platform sets a time-based " +
+				"retentionPolicy such as \"7d\" in the BackupStorage's spec.objectStore")
 		}
 	}
 	if a.DB.Spec.Backup.PITR.Enabled {
@@ -650,7 +651,7 @@ func (a *applier) DataImport() error {
 }
 
 func (a *applier) currentStorageSize() (resource.Quantity, error) {
-	size, found, err := unstructured.NestedString(a.Object, "spec", "storage", "size")
+	size, found, err := unstructured.NestedString(a.Object, "spec", fieldStorage, "size")
 	if err != nil {
 		return resource.Quantity{}, fmt.Errorf("read current CloudNativePG storage size: %w", err)
 	}
@@ -682,7 +683,7 @@ func (a *applier) configureMonitoring(spec map[string]any) error {
 // postgresql.parameters. Exported so the webhook detects keys also set in spec.cnpg.
 func ParsePostgreSQLParameters(config string) map[string]any {
 	parameters := map[string]any{}
-	for _, line := range strings.Split(config, "\n") {
+	for line := range strings.SplitSeq(config, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
 			continue
