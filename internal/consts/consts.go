@@ -46,8 +46,33 @@ const (
 	CNPGDeploymentName = "cnpg-controller-manager"
 	// CNPGOperatorNamespace is the namespace used by the cluster-wide CNPG installation.
 	CNPGOperatorNamespace = "cnpg-system"
+	// CNPGOperatorAppName [CUSTOM CNPG] là giá trị nhãn "app.kubernetes.io/name" trên Deployment
+	// của CloudNativePG. Dò theo nhãn thay vì theo tên Deployment: tên phụ thuộc cách cài (Helm
+	// đặt "<release>-cloudnative-pg", manifest upstream đặt "cnpg-controller-manager").
+	CNPGOperatorAppName = "cloudnative-pg"
 	// CNPGClusterCRDName is the cluster-scoped CRD required by the CloudNativePG provider.
 	CNPGClusterCRDName = "clusters.postgresql.cnpg.io"
+	// CNPGClusterImageCatalogCRDName [CUSTOM CNPG] là CRD chứa danh mục operand image của
+	// CloudNativePG. Everest chỉ đọc catalog khi CRD này tồn tại (dynamic discovery, Phase 1).
+	CNPGClusterImageCatalogCRDName = "clusterimagecatalogs.postgresql.cnpg.io"
+	// CNPGClusterImageCatalogKind [CUSTOM CNPG] là Kind của danh mục image cluster-scoped.
+	CNPGClusterImageCatalogKind = "ClusterImageCatalog"
+	// BarmanCloudAPIGroup [CUSTOM CNPG] là API group của Barman Cloud Plugin. Group này KHÔNG
+	// thuộc CloudNativePG core — CRD do plugin cài vào cụm, nên phải dynamic discovery trước khi
+	// dùng, giống cách kiểm tra CRD của CNPG ở Phase 1.
+	BarmanCloudAPIGroup = "barmancloud.cnpg.io"
+	// BarmanCloudObjectStoreKind [CUSTOM CNPG] là CRD mô tả đích lưu trữ backup của plugin.
+	BarmanCloudObjectStoreKind = "ObjectStore"
+	// BarmanCloudObjectStoreCRDName [CUSTOM CNPG] dùng để kiểm tra plugin đã được cài hay chưa.
+	BarmanCloudObjectStoreCRDName = "objectstores.barmancloud.cnpg.io"
+	// BarmanCloudPluginName [CUSTOM CNPG] là tên plugin mà CNPG dùng để tra Service có nhãn
+	// "cnpg.io/pluginName". Phải khớp đúng tên plugin đã cài trong namespace cnpg-system.
+	BarmanCloudPluginName = "barman-cloud.cloudnative-pg.io"
+	// CNPGClusterImageCatalogName [CUSTOM CNPG] là TÊN QUY ƯỚC của ClusterImageCatalog mà Everest
+	// tra để biết operand image nào được nền tảng duyệt. Catalog do platform team quản qua GitOps
+	// (xem demo/k8s/argocd/01-image-catalog.yaml); Everest chỉ đọc, không bao giờ tự tạo hay sửa.
+	// Đổi tên ở manifest thì phải đổi hằng số này.
+	CNPGClusterImageCatalogName = "everest-postgresql"
 	// PodMonitorCRDName [CUSTOM CNPG] là CRD của Prometheus Operator. Chỉ khi CRD này tồn tại
 	// trên cụm K8s, CNPG provider mới bật "spec.monitoring.enablePodMonitor" cho Cluster —
 	// tránh lỗi reconcile khi lab chưa cài Prometheus Operator (xem PLAN.md Phase 8).
@@ -78,6 +103,10 @@ const (
 	CNPGPublicationKind = "Publication"
 	// CNPGSubscriptionKind [CUSTOM CNPG] là CRD logical replication Subscription của CloudNativePG.
 	CNPGSubscriptionKind = "Subscription"
+	// CNPGPoolerKind [CUSTOM CNPG] là CRD connection pooler (PgBouncer) của CloudNativePG.
+	CNPGPoolerKind = "Pooler"
+	// CNPGPoolerNameLabel [CUSTOM CNPG] là nhãn CNPG gắn lên pod của Pooler, dùng cho PDB selector.
+	CNPGPoolerNameLabel = "cnpg.io/poolerName"
 	// PerconaXtraDBClusterRestoreKind is the kind for Percona XtraDB Cluster restore.
 	PerconaXtraDBClusterRestoreKind = "PerconaXtraDBClusterRestore"
 	// LoadBalancerConfigKind is the kind for load balancer configs.

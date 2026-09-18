@@ -186,8 +186,23 @@ func (r *DatabaseClusterReconciler) reconcileDB(
 	}
 
 	// Update the status of the DatabaseCluster object after the reconciliation.
+	//
+	// Lỗi của vòng reconcile được GIỮ LẠI, không bị kết quả cập nhật status ghi đè. Trước đây
+	// dòng này gán thẳng `rr, rerr = r.reconcileDBStatus(...)`, nên mọi lỗi từ applier —
+	// Engine(), Proxy(), Backup()… — đều biến mất: log in "Reconciled" bình thường, cụm vẫn hiện
+	// ready, trong khi cấu hình không bao giờ được áp. Một lỗi kiểu đó không để lại dấu vết nào
+	// để lần ra.
 	defer func() {
-		rr, rerr = r.reconcileDBStatus(ctx, db, p)
+		statusResult, statusErr := r.reconcileDBStatus(ctx, db, p, rerr)
+		if rerr != nil {
+			// Giữ nguyên lỗi gốc; cập nhật status chỉ là best-effort và controller-runtime sẽ
+			// requeue theo lỗi đó.
+			if statusErr != nil {
+				logger.Error(statusErr, "failed to update DatabaseCluster status")
+			}
+			return
+		}
+		rr, rerr = statusResult, statusErr
 	}()
 
 	// Run pre-reconcile hook.
@@ -258,6 +273,13 @@ func (r *DatabaseClusterReconciler) reconcileDB(
 		if err := applier.Replication(); err != nil {
 			return fmt.Errorf("failed to apply replication: %w", err)
 		}
+		// [CUSTOM CNPG] Passthrough runs last so it sees everything the steps above generated,
+		// and reports a conflict instead of silently overriding it. See PLAN.md Phase 12.
+		if pt, ok := applier.(everestv1alpha1.PassthroughApplier); ok {
+			if err := pt.Passthrough(); err != nil {
+				return fmt.Errorf("failed to apply engine passthrough: %w", err)
+			}
+		}
 		return nil
 	}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to create or update database cluster: %w", err)
@@ -277,10 +299,49 @@ func (r *DatabaseClusterReconciler) reconcileDB(
 	return ctrl.Result{}, nil
 }
 
+// maxConditionMessageLength is the maxLength of metav1.Condition.Message in the CRD schema.
+const maxConditionMessageLength = 32768
+
+// [CUSTOM CNPG] setReconcileFailedCondition đưa lỗi của vòng reconcile lên status.conditions.
+//
+// Không có nó, mọi lỗi áp cấu hình — xung đột spec.cnpg, ValidatingAdmissionPolicy của nền tảng
+// từ chối Cluster, webhook CNPG từ chối — chỉ nằm trong log operator: `kubectl apply` báo thành
+// công, status vẫn "ready" vì cụm cũ vẫn chạy, và người dùng không có cách nào biết cấu hình mới
+// không được áp.
+//
+// Conflict bị bỏ qua: đó là object vừa bị ghi bởi ai khác, vòng sau tự qua. Bật/tắt condition vì
+// nó chỉ làm condition nhấp nháy và che mất lỗi thật đang tồn tại.
+func setReconcileFailedCondition(status *everestv1alpha1.DatabaseClusterStatus, reconcileErr error, generation int64) {
+	switch {
+	case reconcileErr == nil:
+		meta.RemoveStatusCondition(&status.Conditions, everestv1alpha1.ConditionTypeReconcileFailed)
+	case k8serrors.IsConflict(reconcileErr):
+		return
+	default:
+		reason := everestv1alpha1.ReasonApplyFailed
+		if k8serrors.IsInvalid(reconcileErr) || k8serrors.IsForbidden(reconcileErr) {
+			reason = everestv1alpha1.ReasonRejectedByAPIServer
+		}
+		message := reconcileErr.Error()
+		if len(message) > maxConditionMessageLength {
+			// Cắt theo byte có thể rơi giữa một ký tự nhiều byte (thông báo policy là tiếng Việt).
+			message = strings.ToValidUTF8(message[:maxConditionMessageLength], "")
+		}
+		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+			Type:               everestv1alpha1.ConditionTypeReconcileFailed,
+			Status:             metav1.ConditionTrue,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: generation,
+		})
+	}
+}
+
 func (r *DatabaseClusterReconciler) reconcileDBStatus( //nolint:funcorder
 	ctx context.Context,
 	db *everestv1alpha1.DatabaseCluster,
 	p dbProvider,
+	reconcileErr error,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	namespacedName := client.ObjectKeyFromObject(db)
@@ -301,6 +362,8 @@ func (r *DatabaseClusterReconciler) reconcileDBStatus( //nolint:funcorder
 			return ctrl.Result{}, err
 		}
 	}
+
+	setReconcileFailedCondition(&db.Status, reconcileErr, db.GetGeneration())
 
 	// make a copy to use later in the update
 	dbStatus = db.Status
@@ -368,6 +431,17 @@ func (r *DatabaseClusterReconciler) observeDataImportState(
 // +kubebuilder:rbac:groups=pgv2.percona.com,resources=perconapgclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=scheduledbackups,verbs=get;list;watch;create;update;patch;delete
+// [CUSTOM CNPG] Logical replication (PLAN.md Phase 10): Replication() gọi CreateOrUpdate trên
+// Publication/Subscription và pruneReplicationObjects() list/delete chúng. Thiếu quyền ở đây thì
+// reconcile báo 403 trên cụm thật, trong khi unit test dùng fake client nên không phát hiện được.
+// +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=publications,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=subscriptions,verbs=get;list;watch;create;update;patch;delete
+// [CUSTOM CNPG] Sao lưu đi qua Barman Cloud Plugin: Everest dịch BackupStorage thành ObjectStore
+// của plugin. Group này do plugin cài, không thuộc CNPG core.
+// +kubebuilder:rbac:groups=barmancloud.cnpg.io,resources=objectstores,verbs=get;list;watch;create;update;patch;delete
+// [CUSTOM CNPG] Connection pooler và PodDisruptionBudget đi kèm — CNPG không tự tạo PDB cho Pooler.
+// +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=poolers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods;services,verbs=get;list;watch
 // +kubebuilder:rbac:groups=everest.percona.com,resources=monitoringconfigs,verbs=get;list;watch
@@ -823,7 +897,8 @@ func (r *DatabaseClusterReconciler) initWatchers(controller *builder.Builder, de
 
 			return requests
 		}),
-		builder.WithPredicates(predicate.GenerationChangedPredicate{},
+		builder.WithPredicates(
+			predicate.GenerationChangedPredicate{},
 			predicates.GetBackupStoragePredicate(),
 			defaultPredicate,
 		),
@@ -1160,7 +1235,8 @@ func (r *DatabaseClusterReconciler) deleteSecret(ctx context.Context, secretName
 }
 
 func newPXCRestoreWatchSource(cache cache.Cache) source.Source { //nolint:ireturn
-	return source.TypedKind[client.Object](cache, &pxcv1.PerconaXtraDBClusterRestore{},
+	return source.TypedKind[client.Object](
+		cache, &pxcv1.PerconaXtraDBClusterRestore{},
 		handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
 			pxcRestore, ok := obj.(*pxcv1.PerconaXtraDBClusterRestore)
 			if !ok {

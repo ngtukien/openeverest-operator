@@ -51,7 +51,18 @@ var (
 // - destinationPath: đường dẫn s3://<bucket>/<prefix> hoặc Azure URL
 // - s3Credentials / azureCredentials: ánh xạ các key từ Secret (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
 // - endpointURL: hỗ trợ S3-compatible như MinIO, SeaweedFS, Ceph RGW.
-func BarmanObjectStore(storage *everestv1alpha1.BackupStorage, db *everestv1alpha1.DatabaseCluster) (map[string]any, error) {
+//
+// Tham số regionSecretName là tên Secret DO EVEREST SỞ HỮU, chứa key AWS_REGION. Nó tồn tại vì barman chỉ
+// nhận region qua secret reference (`s3Credentials.region` là SecretKeySelector, không có trường
+// phẳng), trong khi BackupStorage.spec.region của Everest là một chuỗi literal. Trước đây code trỏ
+// thẳng vào Secret credential của người dùng với key AWS_REGION — nhưng secret đó theo tài liệu chỉ
+// có AWS_ACCESS_KEY_ID và AWS_SECRET_ACCESS_KEY, nên WAL archiving chết với
+// "missing key AWS_REGION, inside secret" và chỉ lộ ra lúc archive, không phải lúc apply.
+func BarmanObjectStore(
+	storage *everestv1alpha1.BackupStorage,
+	db *everestv1alpha1.DatabaseCluster,
+	regionSecretName string,
+) (map[string]any, error) {
 	if storage.Spec.ForcePathStyle != nil && *storage.Spec.ForcePathStyle {
 		return nil, errors.New("CloudNativePG in-tree backups do not support forcePathStyle")
 	}
@@ -69,7 +80,7 @@ func BarmanObjectStore(storage *everestv1alpha1.BackupStorage, db *everestv1alph
 		result["destinationPath"] = fmt.Sprintf("s3://%s/%s", strings.Trim(storage.Spec.Bucket, "/"), prefix)
 		if storage.Spec.Region != "" {
 			result["s3Credentials"] = map[string]any{
-				"region":          map[string]any{"name": secret, "key": "AWS_REGION"},
+				"region":          map[string]any{fieldName: regionSecretName, fieldKey: regionSecretKey},
 				"accessKeyId":     map[string]any{"name": secret, "key": "AWS_ACCESS_KEY_ID"},
 				"secretAccessKey": map[string]any{"name": secret, "key": "AWS_SECRET_ACCESS_KEY"},
 			}

@@ -116,11 +116,13 @@ func (v *DatabaseClusterValidator) ValidateCreate(ctx context.Context, db *evere
 	isCNPG := db.Spec.Engine.EffectiveProvider() == everestv1alpha1.DatabaseEngineProviderCloudNativePG
 	if isCNPG {
 		allErrs = append(allErrs, v.validateCNPGCapabilities(ctx, db, true)...)
-	} else {
-		// Validate the engine version against the DatabaseEngine catalog for
-		// providers managed through Everest's regular discovery flow.
-		allErrs = append(allErrs, v.validateEngineVersion(ctx, db)...)
 	}
+	// Validate the engine version against the DatabaseEngine catalog.
+	// [CUSTOM CNPG] Kiểm tra này trước đây bỏ qua CloudNativePG vì provider đó không có
+	// DatabaseEngine nào để đối chiếu — hệ quả là gõ version không tồn tại vẫn apply được và chỉ
+	// chết ở ImagePullBackOff. Nay danh sách version của CNPG đến từ ClusterImageCatalog nên
+	// kiểm tra này áp dụng cho mọi provider.
+	allErrs = append(allErrs, v.validateEngineVersion(ctx, db)...)
 
 	if err := v.validateUserSecret(ctx, db); err != nil {
 		allErrs = append(allErrs, err)
@@ -145,6 +147,8 @@ func (v *DatabaseClusterValidator) ValidateCreate(ctx context.Context, db *evere
 	if db.Spec.Replication != nil && !isCNPG {
 		allErrs = append(allErrs, field.Forbidden(dbcReplicationPath, "replication is only supported by the CloudNativePG provider"))
 	}
+	// [CUSTOM CNPG] spec.cnpg passthrough, xem PLAN.md Phase 12.
+	allErrs = append(allErrs, validateCNPGPassthrough(db, isCNPG)...)
 
 	if warn := db.Spec.Proxy.Expose.Type.DeprecationWarning(); warn != "" {
 		warns = append(warns, warn)
@@ -202,6 +206,11 @@ func (v *DatabaseClusterValidator) ValidateUpdate(ctx context.Context, oldDb, ne
 	// [CUSTOM CNPG] Replication (Publication/Subscription) is CloudNativePG-only.
 	if newDb.Spec.Replication != nil && !isCNPG {
 		allErrs = append(allErrs, field.Forbidden(dbcReplicationPath, "replication is only supported by the CloudNativePG provider"))
+	}
+	// [CUSTOM CNPG] spec.cnpg passthrough, xem PLAN.md Phase 12.
+	allErrs = append(allErrs, validateCNPGPassthrough(newDb, isCNPG)...)
+	if isCNPG {
+		allErrs = append(allErrs, v.validateCNPGPassthroughUpdate(ctx, oldDb, newDb)...)
 	}
 
 	if warn := newDb.Spec.Proxy.Expose.Type.DeprecationWarning(); warn != "" {
@@ -306,24 +315,41 @@ func validateCNPGEngine(engine everestv1alpha1.Engine) field.ErrorList {
 	return allErrs
 }
 
+// [CUSTOM CNPG] validateCNPGProxy kiểm tra phần proxy khi provider là CloudNativePG.
+//
+// Kiểm tra này chỉ còn chặn config và storage; proxy.type/replicas/resources nay được hỗ trợ — Everest dựng CRD
+// "Pooler" của CNPG từ chúng, nên bật/tắt pooler là đổi một trường trên DatabaseCluster thay vì
+// phải khai một CR riêng nằm ngoài vòng quản lý của Everest.
 func validateCNPGProxy(proxy everestv1alpha1.Proxy) field.ErrorList {
 	var allErrs field.ErrorList
-	unsupportedProxyMessage := "CloudNativePG does not use an Everest-managed proxy; configure only spec.proxy.expose"
-	if proxy.Type != "" {
-		allErrs = append(allErrs, field.Forbidden(dbcProxyTypePath, unsupportedProxyMessage))
+	if proxy.Type != "" && proxy.Type != everestv1alpha1.ProxyTypePGBouncer {
+		allErrs = append(allErrs, field.NotSupported(
+			dbcProxyTypePath, proxy.Type,
+			[]string{string(everestv1alpha1.ProxyTypePGBouncer)},
+		))
 	}
-	if proxy.Replicas != nil {
-		allErrs = append(allErrs, field.Forbidden(dbcProxyReplicasPath, unsupportedProxyMessage))
-	}
+	// proxy.config của Everest là chuỗi INI tự do. Chuyển thẳng xuống PgBouncer nghĩa là cho phép
+	// đặt bất kỳ tham số nào, kể cả thứ phá pool — cần một API có kiểu trước khi mở.
 	if proxy.Config != "" {
-		allErrs = append(allErrs, field.Forbidden(dbcProxyConfigPath, unsupportedProxyMessage))
+		allErrs = append(allErrs, field.Forbidden(dbcProxyConfigPath,
+			"CloudNativePG pooler does not support free-form spec.proxy.config"))
 	}
 	if proxy.Storage != nil {
-		allErrs = append(allErrs, field.Forbidden(dbcProxyStoragePath, unsupportedProxyMessage))
+		allErrs = append(allErrs, field.Forbidden(dbcProxyStoragePath,
+			"CloudNativePG pooler does not use spec.proxy.storage"))
 	}
-	proxyResources := proxy.Resources.ToResourceRequirements()
-	if len(proxyResources.Limits) != 0 || len(proxyResources.Requests) != 0 {
-		allErrs = append(allErrs, field.Forbidden(dbcProxyResourcesPath, unsupportedProxyMessage))
+	// Khai replicas hay resources mà không bật pooler là cấu hình vô nghĩa, dễ khiến người dùng
+	// tưởng đã có pooler.
+	if proxy.Type == "" {
+		proxyResources := proxy.Resources.ToResourceRequirements()
+		if proxy.Replicas != nil {
+			allErrs = append(allErrs, field.Forbidden(dbcProxyReplicasPath,
+				"set spec.proxy.type=pgbouncer to enable the pooler"))
+		}
+		if len(proxyResources.Limits) != 0 || len(proxyResources.Requests) != 0 {
+			allErrs = append(allErrs, field.Forbidden(dbcProxyResourcesPath,
+				"set spec.proxy.type=pgbouncer to enable the pooler"))
+		}
 	}
 	return allErrs
 }
@@ -442,8 +468,15 @@ func checkJSONKeyExists(keyExpr string, obj any) (bool, error) {
 func (v *DatabaseClusterValidator) validateEngineVersion(ctx context.Context, db *everestv1alpha1.DatabaseCluster) field.ErrorList {
 	var allErrs field.ErrorList
 
-	// Get the DatabaseEngine
-	if engine, err := common.GetDatabaseEngineForType(ctx, v.Client, db.Spec.Engine.Type, db.GetNamespace()); err != nil {
+	// Get the DatabaseEngine.
+	// [CUSTOM CNPG] Tra theo provider, không chỉ theo type: PostgreSQL có hai DatabaseEngine
+	// (percona-postgresql-operator và cnpg-controller-manager) cùng spec.type.
+	if engine, err := common.GetDatabaseEngineForProvider(
+		ctx, v.Client,
+		db.Spec.Engine.Type,
+		db.Spec.Engine.EffectiveProvider(),
+		db.GetNamespace(),
+	); err != nil {
 		allErrs = append(allErrs, errInvalidField(dbcEngineTypePath, string(db.Spec.Engine.Type), err.Error()))
 	} else {
 		// Check if the engine version is available

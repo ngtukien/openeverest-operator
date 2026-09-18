@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	everestv1alpha1 "github.com/percona/everest-operator/api/everest/v1alpha1"
+	"github.com/percona/everest-operator/internal/controller/everest/common"
 )
 
 // +kubebuilder:webhook:path=/mutate-everest-percona-com-v1alpha1-databasecluster,mutating=true,failurePolicy=fail,sideEffects=None,groups=everest.percona.com,resources=databaseclusters,verbs=create;update,versions=v1alpha1,name=mdatabasecluster-v1alpha1.everest.percona.com,admissionReviewVersions=v1
@@ -63,12 +64,23 @@ func (d *DatabaseClusterDefaulter) Default(ctx context.Context, db *everestv1alp
 		return err
 	}
 
-	var dbEngine everestv1alpha1.DatabaseEngine
-	var found bool
-	if dbEngine, found = dbEngines.Get(db.Spec.Engine.Type); !found {
+	if _, found := dbEngines.Get(db.Spec.Engine.Type); !found {
 		return apierrors.NewInvalid(dbClusterGroupKind, db.GetName(), field.ErrorList{
 			field.NotSupported(dbcEngineTypePath, db.Spec.Engine.Type, dbEngines.EngineTypes()),
 		})
+	}
+
+	// [CUSTOM CNPG] Tra theo provider như validateEngineVersion: PostgreSQL có hai DatabaseEngine
+	// cùng spec.type, và phần tử đầu tiên theo tên là cnpg-controller-manager. Lấy theo type thì
+	// version mặc định rơi vào danh sách của CNPG trong khi validator kiểm tra danh sách Percona.
+	dbEngine, err := common.GetDatabaseEngineForProvider(
+		ctx, d.Client,
+		db.Spec.Engine.Type,
+		db.Spec.Engine.EffectiveProvider(),
+		db.GetNamespace(),
+	)
+	if err != nil {
+		return err
 	}
 
 	// Set the default engine version if not specified
@@ -77,7 +89,7 @@ func (d *DatabaseClusterDefaulter) Default(ctx context.Context, db *everestv1alp
 	}
 
 	importTpl := pointer.Get(db.Spec.DataSource).DataImport
-	err := handleS3CredentialsSecret(ctx, d.Client, db.GetNamespace(), importTpl)
+	err = handleS3CredentialsSecret(ctx, d.Client, db.GetNamespace(), importTpl)
 	if err != nil {
 		logger.Error(err, "handleS3CredentialsSecret failed")
 		return err

@@ -126,3 +126,38 @@ func TestDatabaseClusterDefaulter_CNPGDoesNotRequireDatabaseEngine(t *testing.T)
 	require.NoError(t, (&DatabaseClusterDefaulter{Client: client}).Default(t.Context(), db))
 	assert.Equal(t, "16.4", db.Spec.Engine.Version)
 }
+
+// [CUSTOM CNPG] Hai DatabaseEngine cùng spec.type postgresql. Cụm Percona không khai version phải
+// nhận version mặc định của percona-postgresql-operator, không phải của cnpg-controller-manager
+// (đứng trước theo tên và có thể chưa có version nào).
+func TestDatabaseClusterDefaulter_PerconaPGIgnoresCNPGEngine(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, everestv1alpha1.AddToScheme(scheme))
+	const ns = "databases"
+	pgEngine := func(name string, versions everestv1alpha1.ComponentsMap) *everestv1alpha1.DatabaseEngine {
+		return &everestv1alpha1.DatabaseEngine{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec:       everestv1alpha1.DatabaseEngineSpec{Type: everestv1alpha1.DatabaseEnginePostgresql},
+			Status: everestv1alpha1.DatabaseEngineStatus{
+				AvailableVersions: everestv1alpha1.Versions{Engine: versions},
+			},
+		}
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		pgEngine(consts.CNPGDeploymentName, everestv1alpha1.ComponentsMap{}),
+		pgEngine(consts.PGDeploymentName, everestv1alpha1.ComponentsMap{
+			"18.4": {Status: everestv1alpha1.DBEngineComponentRecommended},
+		}),
+	).Build()
+	db := &everestv1alpha1.DatabaseCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "percona-pg", Namespace: ns},
+		Spec: everestv1alpha1.DatabaseClusterSpec{Engine: everestv1alpha1.Engine{
+			Type: everestv1alpha1.DatabaseEnginePostgresql,
+		}},
+	}
+
+	require.NoError(t, (&DatabaseClusterDefaulter{Client: client}).Default(t.Context(), db))
+	assert.Equal(t, "18.4", db.Spec.Engine.Version)
+}

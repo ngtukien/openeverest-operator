@@ -16,6 +16,7 @@
 package predicates
 
 import (
+	"k8s.io/apimachinery/pkg/api/equality"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -45,7 +46,10 @@ func GetBackupStoragePredicate() predicate.Funcs {
 				oldBS.Spec.EndpointURL != newBS.Spec.EndpointURL ||
 				oldBS.Spec.VerifyTLS != newBS.Spec.VerifyTLS ||
 				oldBS.Spec.ForcePathStyle != newBS.Spec.ForcePathStyle ||
-				oldBS.Spec.CredentialsSecretName != newBS.Spec.CredentialsSecretName
+				oldBS.Spec.CredentialsSecretName != newBS.Spec.CredentialsSecretName ||
+				// [CUSTOM CNPG] Chính sách backup (retention, nén, sidecar) nằm ở đây; thiếu dòng
+				// này thì sửa nó không bao giờ lan xuống ObjectStore của các cụm đang dùng.
+				!equality.Semantic.DeepEqual(oldBS.Spec.ObjectStore, newBS.Spec.ObjectStore)
 		},
 
 		// BackupStorage can be deleted only in case it is not used -> no need to reconcile DatabaseClusters.

@@ -66,6 +66,21 @@ spec:
                   ForcePathStyle is set to use path-style URLs.
                   If unspecified, the default value is false.
                 type: boolean
+              objectStore:
+                description: |-
+                  [CUSTOM CNPG] ObjectStore is a fragment of a Barman Cloud Plugin ObjectStore ".spec"
+                  (barmancloud.cnpg.io/v1), written exactly as in an ObjectStore manifest. It carries HOW
+                  clusters back up to this storage: retentionPolicy, instanceSidecarConfiguration and
+                  configuration.wal / configuration.data (compression, encryption, parallelism) and tags.
+                  WHERE comes from the fields above (bucket, endpointURL, credentials, region) and is rejected
+                  here, as are serverName and raw barman-cloud command arguments.
+
+                  Every CloudNativePG DatabaseCluster archiving to this storage gets its own ObjectStore
+                  "<cluster>-<storage>" with this policy; clusters needing a different policy use another
+                  BackupStorage on the same bucket. Never applied to the store a restore reads from.
+                  Ignored by the Percona providers. Xem PLAN.md Phase 12.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
               region:
                 description: Region is a region where the bucket is located.
                 type: string

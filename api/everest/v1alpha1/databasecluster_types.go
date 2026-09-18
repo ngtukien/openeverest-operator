@@ -22,6 +22,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	utiljson "k8s.io/apimachinery/pkg/util/json"
 
 	enginefeatureseverestv1alpha1 "github.com/percona/everest-operator/api/enginefeatures.everest/v1alpha1"
 )
@@ -165,6 +167,15 @@ type Applier interface {
 	Replication() error
 	// [CUSTOM CNPG] ReplicaCluster reconciles physical replica-cluster (cross-zone DR) settings. See PLAN.md Phase 11.
 	ReplicaCluster() error
+}
+
+// PassthroughApplier is implemented by appliers that accept a verbatim fragment of the upstream
+// operator's spec (spec.cnpg for CloudNativePG). It is separate from Applier so providers without
+// passthrough stay untouched; the controller runs it after every other Applier step.
+//
+// +kubebuilder:object:generate=false
+type PassthroughApplier interface {
+	Passthrough() error
 }
 
 // Storage is the storage configuration.
@@ -586,6 +597,39 @@ type DatabaseClusterSpec struct {
 	// from an external primary via pg_basebackup, then kept in sync by physical streaming
 	// replication. CloudNativePG-only; xem PLAN.md Phase 11.
 	Replica *ReplicaCluster `json:"replica,omitempty"`
+	// [CUSTOM CNPG] CNPG is a fragment of a CloudNativePG Cluster ".spec", written exactly as in a
+	// postgresql.cnpg.io/v1 Cluster manifest (bootstrap, externalClusters, postgresql.synchronous,
+	// managed.roles, replica, replicationSlots, primaryUpdateStrategy, ...). Everest merges it
+	// into the Cluster it generates and CloudNativePG reconciles it natively.
+	//
+	// Fields Everest owns (instances, imageName, imageCatalogRef, resources, storage size and
+	// class, including their storage.pvcTemplate forms) are rejected here: set them through
+	// spec.engine. Any
+	// other field Everest also generates must carry the same value, otherwise reconcile fails
+	// naming the conflicting path. CloudNativePG-only; xem PLAN.md Phase 12.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	// +optional
+	CNPG *runtime.RawExtension `json:"cnpg,omitempty"`
+}
+
+// CNPGSpec decodes spec.cnpg into an unstructured CloudNativePG Cluster spec fragment. Integers
+// decode as int64, matching what the unstructured client produces. It returns nil when unset.
+func (in *DatabaseClusterSpec) CNPGSpec() (map[string]any, error) {
+	return decodeRawObject(in.CNPG, "spec.cnpg")
+}
+
+// decodeRawObject decodes a PreserveUnknownFields fragment into an unstructured map. Integers
+// decode as int64, matching what the unstructured client produces. It returns nil when unset.
+func decodeRawObject(raw *runtime.RawExtension, path string) (map[string]any, error) {
+	if raw == nil || len(raw.Raw) == 0 || string(raw.Raw) == "null" {
+		return nil, nil //nolint:nilnil
+	}
+	object := map[string]any{}
+	if err := utiljson.Unmarshal(raw.Raw, &object); err != nil {
+		return nil, fmt.Errorf("%s must be a JSON object: %w", path, err)
+	}
+	return object, nil
 }
 
 // ReplicaCluster configures this cluster as a standby replica cluster of another
@@ -738,6 +782,11 @@ const (
 	ConditionTypeVolumeResizeFailed = "VolumeResizeFailed"
 	// ConditionTypeImportFailed is a condition type that indicates that the data import failed.
 	ConditionTypeImportFailed = "ImportFailed"
+	// ConditionTypeReconcileFailed indicates that the last reconciliation could not
+	// apply the DatabaseCluster spec to the underlying operator's resources. The running database
+	// keeps its previous configuration, so status.status may still read "ready". Removed as soon
+	// as a reconciliation succeeds. Added by the CloudNativePG provider.
+	ConditionTypeReconcileFailed = "ReconcileFailed"
 )
 
 const (
@@ -752,6 +801,13 @@ const (
 	ReasonVolumeResizeFailed = "VolumeResizeFailed"
 	// ReasonDataImportJobFailed is a reason for condition ConditionTypeImportFailed.
 	ReasonDataImportJobFailed = "DataImportJobFailed"
+	// ReasonRejectedByAPIServer is a reason for condition ConditionTypeReconcileFailed when the
+	// API server refused the generated resource: an admission policy or webhook (for example the
+	// CloudNativePG webhook, or a platform ValidatingAdmissionPolicy) or missing permissions.
+	ReasonRejectedByAPIServer = "RejectedByAPIServer"
+	// ReasonApplyFailed is a reason for condition ConditionTypeReconcileFailed for any other
+	// reconciliation error, for example a spec.cnpg conflict or a missing referenced Secret.
+	ReasonApplyFailed = "ApplyFailed"
 )
 
 // DatabaseClusterStatus defines the observed state of DatabaseCluster.
