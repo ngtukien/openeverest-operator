@@ -70,6 +70,10 @@ func validateCNPGPassthrough(db *everestv1alpha1.DatabaseCluster, isCNPG bool) f
 			))
 		}
 	}
+	for _, path := range cnpg.OwnedPluginParameters(user) {
+		allErrs = append(allErrs, field.Forbidden(dbcCNPGPath.Child(path),
+			"is owned by Everest; it is generated from spec.backup and the BackupStorage"))
+	}
 	allErrs = append(allErrs, validateCNPGBootstrapSource(db, user)...)
 	if _, found := user["replica"]; found && db.Spec.Replica != nil {
 		allErrs = append(allErrs, field.Forbidden(dbcCNPGPath.Child("replica"),
@@ -215,4 +219,23 @@ func sortedKeys(m map[string]any) []string {
 	}
 	slices.Sort(keys)
 	return keys
+}
+
+// [CUSTOM CNPG] validateReplicationNames chặn tên subscription không dùng được làm tên replication
+// slot. Không chặn thì apply thành công và lỗi chỉ lộ ra trong status của CR Subscription.
+func validateReplicationNames(db *everestv1alpha1.DatabaseCluster) field.ErrorList {
+	if db.Spec.Replication == nil {
+		return nil
+	}
+	var allErrs field.ErrorList
+	for i, sub := range db.Spec.Replication.Subscriptions {
+		if err := cnpg.ValidateSubscriptionName(sub.Name); err != nil {
+			allErrs = append(allErrs, field.Invalid(
+				dbcReplicationPath.Child("subscriptions").Index(i).Child("name"), sub.Name,
+				"must contain only lowercase letters, digits and underscores (max 63): "+
+					"PostgreSQL uses it as the replication slot name on the publisher",
+			))
+		}
+	}
+	return allErrs
 }

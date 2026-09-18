@@ -17,6 +17,7 @@ package everest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -39,6 +40,7 @@ import (
 	everestv1alpha1 "github.com/percona/everest-operator/api/everest/v1alpha1"
 	"github.com/percona/everest-operator/internal/consts"
 	"github.com/percona/everest-operator/internal/controller/everest/common"
+	cnpgprovider "github.com/percona/everest-operator/internal/controller/everest/providers/cnpg"
 )
 
 // BackupStorageReconciler reconciles a BackupStorage object.
@@ -51,6 +53,7 @@ type BackupStorageReconciler struct {
 // +kubebuilder:rbac:groups=everest.percona.com,resources=backupstorages/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=everest.percona.com,resources=backupstorages/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;watch;list
+// +kubebuilder:rbac:groups=barmancloud.cnpg.io,resources=objectstores,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -111,6 +114,19 @@ func (r *BackupStorageReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		if err = r.Update(ctx, bsSecret); err != nil {
 			return ctrl.Result{}, err
+		}
+	}
+
+	// [CUSTOM CNPG] ObjectStore dùng chung của Barman Cloud Plugin có ngay khi BackupStorage xuất
+	// hiện, không đợi cụm CNPG đầu tiên. BackupStorage cũng phục vụ PXC/PSMDB, nên plugin chưa cài
+	// hay storage không hợp với CNPG chỉ có nghĩa là không có store — không phải lỗi reconcile.
+	if bs.GetDeletionTimestamp().IsZero() {
+		switch err = cnpgprovider.ReconcileSharedObjectStore(ctx, r.Client, bs); {
+		case err == nil:
+		case errors.Is(err, cnpgprovider.ErrBarmanCloudPluginMissing), errors.Is(err, cnpgprovider.ErrStorageUnsupported):
+			logger.V(1).Info("skipping Barman Cloud ObjectStore", "reason", err.Error())
+		default:
+			return ctrl.Result{}, fmt.Errorf("reconcile Barman Cloud ObjectStore: %w", err)
 		}
 	}
 

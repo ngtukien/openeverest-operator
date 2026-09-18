@@ -519,30 +519,24 @@ func (a *applier) Backup() error {
 		// [CUSTOM CNPG] Sao lưu đi qua Barman Cloud Plugin, không phải "spec.backup.barmanObjectStore"
 		// in-tree — xem objectstore.go để biết vì sao in-tree không dùng được với operand image
 		// flavor `standard` trong ClusterImageCatalog của nền tảng.
-		store := objectStoreName(a.DB.Name, storageName)
-		if storage.Spec.Region != "" {
-			if err := a.reconcileRegionSecret(store, storage.Spec.Region); err != nil {
-				return err
-			}
-		}
-		config, err := BarmanObjectStore(storage, a.DB, regionSecretName(store))
-		if err != nil {
-			return err
-		}
-		// "Backup thế nào" (retention, nén, sidecar) cũng thuộc BackupStorage: một chính sách cho
-		// mọi cụm dùng storage này, do platform quản.
-		overrides, err := storage.Spec.ObjectStoreSpec()
-		if err != nil {
-			return fmt.Errorf("BackupStorage %q: %w", storageName, err)
-		}
-		if err := a.reconcileObjectStore(store, storageName, config, overrides); err != nil {
+		//
+		// Store dùng chung của BackupStorage thường đã có sẵn (BackupStorage controller dựng nó);
+		// reconcile lại ở đây để cụm không bao giờ trỏ vào store chưa tồn tại.
+		if err := ReconcileSharedObjectStore(a.ctx, a.C, storage); err != nil {
 			return err
 		}
 		if err := unstructured.SetNestedSlice(
-			a.Object, []any{archiverPluginConfiguration(store)}, "spec", "plugins",
+			a.Object,
+			[]any{archiverPluginConfiguration(SharedObjectStoreName(storageName), ServerName(a.DB))},
+			"spec", "plugins",
 		); err != nil {
 			return err
 		}
+	}
+	// Cụm tạo trước khi chuyển sang store dùng chung còn store riêng <cụm>-<storage>: nay không
+	// còn ai trỏ vào nên dọn đi.
+	if err := a.deleteLegacyObjectStores(); err != nil {
+		return err
 	}
 	for _, schedule := range a.DB.Spec.Backup.Schedules {
 		name := a.DB.Name + "-" + schedule.Name
@@ -599,24 +593,18 @@ func (a *applier) DataSource() error {
 	if err != nil {
 		return err
 	}
-	recoveryStore := objectStoreName(a.DB.Name, "recovery")
-	if storage.Spec.Region != "" {
-		if err := a.reconcileRegionSecret(recoveryStore, storage.Spec.Region); err != nil {
+	// Mặc định đọc backup của cụm nguồn từ store dùng chung, dưới thư mục ServerName của cụm đó.
+	// backupSource.path là đường dẫn tuỳ ý nằm ngoài layout ấy, nên cần store riêng trỏ thẳng vào
+	// nó; khi đó serverName giữ quy ước cũ là tên cụm.
+	sourceName := sourceDB.Name
+	recoveryStore := SharedObjectStoreName(storage.GetName())
+	serverName := ServerName(sourceDB)
+	if bs := a.DB.Spec.DataSource.BackupSource; bs != nil && bs.Path != "" {
+		if recoveryStore, err = a.reconcileRecoveryObjectStore(storage, bs.Path); err != nil {
 			return err
 		}
-	}
-	config, err := BarmanObjectStore(storage, sourceDB, regionSecretName(recoveryStore))
-	if err != nil {
-		return err
-	}
-	if a.DB.Spec.DataSource.BackupSource != nil {
-		config["destinationPath"] = strings.TrimRight(a.DB.Spec.DataSource.BackupSource.Path, "/")
-	}
-	sourceName := sourceDB.Name
-	// [CUSTOM CNPG] serverName KHÔNG đặt trong ObjectStore mà đặt ở phía externalClusters — xem
-	// recoveryPluginConfiguration(). Một store có thể phục vụ nhiều cụm; serverName là thứ phân
-	// tách chúng, nên nó thuộc về phía người đọc chứ không phải phía cái kho.
-	if err := a.reconcileObjectStore(recoveryStore, storage.GetName(), config, nil); err != nil {
+		serverName = sourceDB.Name
+	} else if err := ReconcileSharedObjectStore(a.ctx, a.C, storage); err != nil {
 		return err
 	}
 	recovery := map[string]any{"source": sourceName}
@@ -642,7 +630,7 @@ func (a *applier) DataSource() error {
 	}
 	return unstructured.SetNestedSlice(a.Object, []any{map[string]any{
 		fieldName: sourceName,
-		"plugin":  recoveryPluginConfiguration(recoveryStore, sourceName),
+		"plugin":  recoveryPluginConfiguration(recoveryStore, serverName),
 	}}, "spec", "externalClusters")
 }
 

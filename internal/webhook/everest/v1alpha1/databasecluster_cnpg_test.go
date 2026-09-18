@@ -73,6 +73,12 @@ func TestValidateCNPGPassthrough(t *testing.T) {
 		{name: "backup target is allowed", isCNPG: true, cnpg: `{"backup": {"target": "prefer-standby"}}`},
 		{name: "in-tree barmanObjectStore", isCNPG: true, cnpg: `{"backup": {"barmanObjectStore": {}}}`, wantError: "spec.cnpg.backup.barmanObjectStore: Forbidden"},
 		{
+			name: "barman plugin serverName", isCNPG: true,
+			cnpg:      `{"plugins": [{"name": "barman-cloud.cloudnative-pg.io", "parameters": {"serverName": "other-uid"}}]}`,
+			wantError: "spec.cnpg.plugins[name=barman-cloud.cloudnative-pg.io].parameters.serverName: Forbidden",
+		},
+		{name: "other plugin parameters are allowed", isCNPG: true, cnpg: `{"plugins": [{"name": "cnpg-i-hello-world.cloudnative-pg.io", "parameters": {"serverName": "x"}}]}`},
+		{
 			name: "bootstrap with dataSource", isCNPG: true, cnpg: `{"bootstrap": {"initdb": {}}}`,
 			mutate: func(db *everestv1alpha1.DatabaseCluster) {
 				db.Spec.DataSource = &everestv1alpha1.DataSource{DBClusterBackupName: "b"}
@@ -178,4 +184,18 @@ func TestDatabaseClusterValidator_CNPGPassthroughUpdateGuards(t *testing.T) {
 		_, err := newValidator(existingCluster.DeepCopy()).ValidateUpdate(t.Context(), oldDB, newDB)
 		require.NoError(t, err)
 	})
+}
+
+// [CUSTOM CNPG] Tên subscription là tên replication slot trên publisher: phải chặn ngay lúc apply.
+func TestValidateReplicationNames(t *testing.T) {
+	t.Parallel()
+	db := &everestv1alpha1.DatabaseCluster{Spec: everestv1alpha1.DatabaseClusterSpec{
+		Replication: &everestv1alpha1.Replication{Subscriptions: []everestv1alpha1.ReplicationSubscription{
+			{Name: "trove_sub"}, {Name: "trove-sub"},
+		}},
+	}}
+	errs := validateReplicationNames(db)
+	require.Len(t, errs, 1)
+	assert.Equal(t, "spec.replication.subscriptions[1].name", errs[0].Field)
+	assert.Contains(t, errs[0].Error(), "replication slot name")
 }

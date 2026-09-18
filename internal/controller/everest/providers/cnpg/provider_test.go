@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	everestv1alpha1 "github.com/percona/everest-operator/api/everest/v1alpha1"
@@ -368,14 +370,14 @@ func TestProxyRejectsFreeFormConfig(t *testing.T) {
 
 func TestBarmanObjectStoreS3(t *testing.T) {
 	t.Parallel()
-	db := &everestv1alpha1.DatabaseCluster{ObjectMeta: metav1.ObjectMeta{Name: testClusterName, UID: types.UID("uid-1")}}
 	storage := &everestv1alpha1.BackupStorage{Spec: everestv1alpha1.BackupStorageSpec{
 		Type: everestv1alpha1.BackupStorageTypeS3, Bucket: "backups", EndpointURL: "https://s3.example",
 		CredentialsSecretName: "backup-creds",
 	}}
-	config, err := BarmanObjectStore(storage, db, "orders-s3-region")
+	config, err := BarmanObjectStore(storage, "s3-region")
 	require.NoError(t, err)
-	assert.Equal(t, "s3://backups/orders/uid-1", config["destinationPath"])
+	// Gốc bucket: store dùng chung, mỗi cụm tách thư mục bằng serverName.
+	assert.Equal(t, "s3://backups", config["destinationPath"])
 	assert.Equal(t, "https://s3.example", config["endpointURL"])
 	credentials := config["s3Credentials"].(map[string]any)
 	assert.Equal(t, map[string]any{fieldName: "backup-creds", fieldKey: "AWS_ACCESS_KEY_ID"}, credentials["accessKeyId"])
@@ -386,18 +388,17 @@ func TestBarmanObjectStoreS3(t *testing.T) {
 // nên trỏ nhầm làm WAL archiving chết với "missing key AWS_REGION, inside secret".
 func TestBarmanObjectStoreRegionUsesOwnedSecret(t *testing.T) {
 	t.Parallel()
-	db := &everestv1alpha1.DatabaseCluster{ObjectMeta: metav1.ObjectMeta{Name: testClusterName, UID: types.UID("uid-1")}}
 	storage := &everestv1alpha1.BackupStorage{Spec: everestv1alpha1.BackupStorageSpec{
 		Type: everestv1alpha1.BackupStorageTypeS3, Bucket: "backups", Region: "us-east-1",
 		CredentialsSecretName: "backup-creds",
 	}}
-	config, err := BarmanObjectStore(storage, db, "orders-s3-region")
+	config, err := BarmanObjectStore(storage, "s3-region")
 	require.NoError(t, err)
 	credentials, ok := config["s3Credentials"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(
 		t,
-		map[string]any{fieldName: "orders-s3-region", fieldKey: regionSecretKey},
+		map[string]any{fieldName: "s3-region", fieldKey: regionSecretKey},
 		credentials["region"],
 	)
 	// Access key vẫn lấy từ secret của người dùng.
@@ -466,24 +467,29 @@ func TestBackupCreatesScheduledBackup(t *testing.T) {
 	assert.Equal(t, true, plugin["isWALArchiver"])
 	parameters, ok := plugin["parameters"].(map[string]any)
 	require.True(t, ok)
-	assert.Equal(t, "orders-s3", parameters["barmanObjectName"])
+	assert.Equal(t, "s3", parameters[parameterBarmanObjectName])
+	assert.Equal(t, "orders-uid-1", parameters[parameterServerName])
 	_, found, err := unstructured.NestedFieldNoCopy(provider.Object, "spec", "backup", "barmanObjectStore")
 	require.NoError(t, err)
 	assert.False(t, found, "in-tree barmanObjectStore phải vắng mặt khi dùng plugin")
 
-	// ObjectStore được sinh ra từ BackupStorage, giữ nguyên layout đường dẫn cũ.
+	// ObjectStore dùng chung mang tên BackupStorage, trỏ gốc bucket và thuộc về BackupStorage —
+	// không phải của cụm, nên xoá cụm không kéo store theo.
 	store := &unstructured.Unstructured{Object: map[string]any{}}
 	store.SetGroupVersionKind(ObjectStoreGVK)
 	require.NoError(t, c.Get(context.Background(),
-		types.NamespacedName{Namespace: testNamespace, Name: "orders-s3"}, store))
-	assert.Equal(t, "s3://backups/orders/uid-1",
+		types.NamespacedName{Namespace: testNamespace, Name: "s3"}, store))
+	assert.Equal(t, "s3://backups",
 		mustNested(t, store.Object, "spec", "configuration", "destinationPath"))
+	owner := metav1.GetControllerOf(store)
+	require.NotNil(t, owner)
+	assert.Equal(t, "BackupStorage", owner.Kind)
+	assert.Equal(t, "s3", owner.Name)
 }
 
 // [CUSTOM CNPG] Chính sách backup nằm ở BackupStorage.spec.objectStore và được gộp vào ObjectStore
-// ARCHIVE của mọi cụm dùng storage đó (retention, sidecar, wal/data). Store RECOVERY mà restore đọc
-// từ backup của cụm nguồn không bao giờ nhận chính sách — nếu nhận, sidecar của cụm mới sẽ áp
-// retention lên backup của cụm khác.
+// dùng chung (retention, sidecar, wal/data). Cụm restore ghi WAL dưới serverName của CHÍNH nó và
+// đọc backup của cụm nguồn dưới serverName của cụm nguồn, trong cùng một store.
 func TestBackupObjectStorePolicyFromBackupStorage(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
@@ -541,42 +547,33 @@ func TestBackupObjectStorePolicyFromBackupStorage(t *testing.T) {
 	require.NoError(t, a.Backup())
 	require.NoError(t, a.DataSource())
 
-	archive := getStore("orders-restored-s3")
+	archive := getStore("s3")
 	assert.Equal(t, "7d", mustNested(t, archive, "spec", "retentionPolicy"))
 	assert.Equal(t, int64(1800), mustNested(t, archive, "spec", "instanceSidecarConfiguration", "retentionPolicyIntervalSeconds"))
 	// "Ở đâu" vẫn do Everest sinh, "thế nào" gộp vào cùng khối configuration.
-	assert.Equal(t, "s3://backups/orders-restored/uid-2", mustNested(t, archive, "spec", "configuration", "destinationPath"))
+	assert.Equal(t, "s3://backups", mustNested(t, archive, "spec", "configuration", "destinationPath"))
 	assert.Equal(t, "zstd", mustNested(t, archive, "spec", "configuration", "wal", "compression"))
 	assert.Equal(t, int64(2), mustNested(t, archive, "spec", "configuration", "data", "jobs"))
 
-	recovery := getStore("orders-restored-recovery")
-	assert.Equal(t, "s3://backups/orders/uid-1", mustNested(t, recovery, "spec", "configuration", "destinationPath"))
-	_, found, err := unstructured.NestedFieldNoCopy(recovery, "spec", "retentionPolicy")
-	require.NoError(t, err)
-	assert.False(t, found, "store recovery trỏ vào backup của cụm nguồn, không được mang retention")
-	_, found, err = unstructured.NestedFieldNoCopy(recovery, "spec", "configuration", "wal")
-	require.NoError(t, err)
-	assert.False(t, found, "store recovery không nhận chính sách của BackupStorage")
+	plugins, ok := mustNested(t, provider.Object, "spec", "plugins").([]any)
+	require.True(t, ok)
+	archiver, ok := plugins[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, map[string]any{parameterBarmanObjectName: "s3", parameterServerName: "orders-restored-uid-2"},
+		archiver[fieldParameters])
 
-	for _, tc := range []struct{ name, policy, want string }{
-		{"destinationPath do Everest sinh", `{"configuration": {"destinationPath": "s3://elsewhere"}}`, "spec.objectStore.configuration.destinationPath is generated"},
-		{"tham số barman thô", `{"configuration": {"wal": {"archiveAdditionalCommandArgs": ["--endpoint-url=http://evil"]}}}`, "raw barman-cloud arguments are not allowed"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			bad := storage.DeepCopy()
-			bad.Name = "bad"
-			bad.Spec.ObjectStore = &runtime.RawExtension{Raw: []byte(tc.policy)}
-			db := source.DeepCopy()
-			db.Spec.Backup.Schedules = []everestv1alpha1.BackupSchedule{{Name: "daily", Enabled: true, Schedule: "0 2 * * *", BackupStorageName: "bad"}}
-			cc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(db, bad, pluginCRD.DeepCopy()).Build()
-			p := &Provider{
-				Unstructured:    &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{}}},
-				ProviderOptions: providers.ProviderOptions{DB: db, C: cc},
-			}
-			require.ErrorContains(t, (&applier{Provider: p, ctx: context.Background()}).Backup(), tc.want)
-		})
-	}
+	external, ok := mustNested(t, provider.Object, "spec", "externalClusters").([]any)
+	require.True(t, ok)
+	source0, ok := external[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, map[string]any{parameterBarmanObjectName: "s3", parameterServerName: "orders-uid-1"},
+		mustNested(t, source0, "plugin", fieldParameters))
+
+	// Không còn store recovery riêng khi đọc từ layout của store dùng chung.
+	missing := &unstructured.Unstructured{Object: map[string]any{}}
+	missing.SetGroupVersionKind(ObjectStoreGVK)
+	err := c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "orders-restored-recovery"}, missing)
+	assert.True(t, apierrors.IsNotFound(err), "store recovery chỉ dùng cho backupSource.path")
 }
 
 // [CUSTOM CNPG] Barman Cloud Plugin cài riêng, không đi kèm CNPG operator. Thiếu nó thì lỗi thô
@@ -594,6 +591,100 @@ func TestBackupRequiresBarmanCloudPlugin(t *testing.T) {
 	err := (&applier{Provider: provider, ctx: context.Background()}).Backup()
 	require.ErrorContains(t, err, "Barman Cloud Plugin")
 	require.ErrorContains(t, err, consts.BarmanCloudObjectStoreCRDName)
+}
+
+// [CUSTOM CNPG] backupSource.path trỏ vào đường dẫn tuỳ ý ngoài layout của store dùng chung, nên
+// restore đọc qua store riêng <cụm>-recovery. Store đó không nhận chính sách của BackupStorage —
+// retention không được áp lên dữ liệu nằm ngoài layout Everest quản.
+func TestDataSourceBackupSourcePathUsesRecoveryStore(t *testing.T) {
+	t.Parallel()
+	scheme, db, storage := newScheduledBackupFixture(t)
+	storage.Spec.ObjectStore = &runtime.RawExtension{Raw: []byte(`{"retentionPolicy": "7d"}`)}
+	db.Spec.Backup.Schedules = nil
+	db.Spec.DataSource = &everestv1alpha1.DataSource{BackupSource: &everestv1alpha1.BackupSource{
+		Path: "s3://legacy/orders/uid-0/", BackupStorageName: "s3",
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(db, storage, crdObject(consts.BarmanCloudObjectStoreCRDName)).Build()
+	provider := &Provider{
+		Unstructured:    &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{}}},
+		ProviderOptions: providers.ProviderOptions{DB: db, C: c},
+	}
+	require.NoError(t, (&applier{Provider: provider, ctx: context.Background()}).DataSource())
+
+	store := &unstructured.Unstructured{Object: map[string]any{}}
+	store.SetGroupVersionKind(ObjectStoreGVK)
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Namespace: testNamespace, Name: "orders-recovery"}, store))
+	assert.Equal(t, "s3://legacy/orders/uid-0", mustNested(t, store.Object, "spec", "configuration", "destinationPath"))
+	_, found, err := unstructured.NestedFieldNoCopy(store.Object, "spec", "retentionPolicy")
+	require.NoError(t, err)
+	assert.False(t, found, "store recovery không được mang retention")
+	assert.True(t, metav1.IsControlledBy(store, db), "store recovery thuộc về cụm restore")
+
+	external, ok := mustNested(t, provider.Object, "spec", "externalClusters").([]any)
+	require.True(t, ok)
+	entry, ok := external[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, map[string]any{parameterBarmanObjectName: "orders-recovery", parameterServerName: testClusterName},
+		mustNested(t, entry, "plugin", fieldParameters))
+}
+
+// [CUSTOM CNPG] Cụm tạo trước khi chuyển sang store dùng chung còn store riêng <cụm>-<storage> và
+// Secret region của nó. Backup() dọn chúng — nhưng chỉ khi chính cụm này là controller owner.
+func TestBackupDeletesLegacyObjectStore(t *testing.T) {
+	t.Parallel()
+	scheme, db, storage := newScheduledBackupFixture(t)
+	require.NoError(t, corev1.AddToScheme(scheme))
+	isController := true
+	ownedByDB := []metav1.OwnerReference{{
+		APIVersion: everestv1alpha1.GroupVersion.String(), Kind: "DatabaseCluster",
+		Name: db.Name, UID: db.UID, Controller: &isController,
+	}}
+	legacy := newUnstructured(ObjectStoreGVK, testNamespace, "orders-s3")
+	legacy.SetLabels(map[string]string{BackupStorageLabel: "s3"})
+	legacy.SetOwnerReferences(ownedByDB)
+	legacyRegion := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: "orders-s3-region", Namespace: testNamespace, OwnerReferences: ownedByDB,
+	}}
+	// Trùng tên kiểu cũ nhưng KHÔNG thuộc cụm này (người dùng tự tạo): phải giữ nguyên.
+	foreign := newUnstructured(ObjectStoreGVK, testNamespace, "orders-other")
+	foreign.SetLabels(map[string]string{BackupStorageLabel: "other"})
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		db, storage, crdObject(consts.BarmanCloudObjectStoreCRDName), legacy, legacyRegion, foreign,
+	).Build()
+	provider := &Provider{
+		Unstructured:    &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{}}},
+		ProviderOptions: providers.ProviderOptions{DB: db, C: c},
+	}
+	require.NoError(t, (&applier{Provider: provider, ctx: context.Background()}).Backup())
+
+	get := func(obj client.Object, name string) error {
+		return c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: name}, obj)
+	}
+	gone := newUnstructured(ObjectStoreGVK, "", "")
+	assert.True(t, apierrors.IsNotFound(get(gone, "orders-s3")), "store kiểu cũ của cụm phải bị xoá")
+	assert.True(t, apierrors.IsNotFound(get(&corev1.Secret{}, "orders-s3-region")), "Secret region kiểu cũ phải bị xoá")
+	require.NoError(t, get(newUnstructured(ObjectStoreGVK, "", ""), "orders-other"))
+	require.NoError(t, get(newUnstructured(ObjectStoreGVK, "", ""), "s3"))
+}
+
+// [CUSTOM CNPG] BackupStorage controller gọi ReconcileSharedObjectStore cho MỌI BackupStorage, kể cả
+// cái chỉ phục vụ PXC/PSMDB. Hai trường hợp "không có store" phải nhận ra được bằng errors.Is để
+// controller bỏ qua thay vì requeue mãi.
+func TestReconcileSharedObjectStoreSentinels(t *testing.T) {
+	t.Parallel()
+	scheme, _, storage := newScheduledBackupFixture(t)
+
+	noPlugin := fake.NewClientBuilder().WithScheme(scheme).WithObjects(storage).Build()
+	require.ErrorIs(t, ReconcileSharedObjectStore(context.Background(), noPlugin, storage), ErrBarmanCloudPluginMissing)
+
+	insecure := storage.DeepCopy()
+	insecure.Spec.VerifyTLS = new(false)
+	withPlugin := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(insecure, crdObject(consts.BarmanCloudObjectStoreCRDName)).Build()
+	require.ErrorIs(t, ReconcileSharedObjectStore(context.Background(), withPlugin, insecure), ErrStorageUnsupported)
 }
 
 func TestStatusResizingVolumes(t *testing.T) {

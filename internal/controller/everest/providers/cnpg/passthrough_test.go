@@ -130,7 +130,7 @@ func TestPassthroughMergesStorageAndPlugins(t *testing.T) {
 		"storage": {"resizeInUseVolumes": true, "pvcTemplate": {"accessModes": ["ReadWriteOnce"], "volumeMode": "Filesystem"}},
 		"walStorage": {"size": "2Gi", "storageClass": "longhorn-wal"},
 		"plugins": [
-			{"name": "barman-cloud.cloudnative-pg.io", "parameters": {"serverName": "orders-v2"}},
+			{"name": "barman-cloud.cloudnative-pg.io", "enabled": true},
 			{"name": "cnpg-i-hello-world.cloudnative-pg.io", "enabled": true}
 		]
 	}`, func(db *everestv1alpha1.DatabaseCluster) {
@@ -139,7 +139,7 @@ func TestPassthroughMergesStorageAndPlugins(t *testing.T) {
 	})
 	// Stand-in for Backup(): the archiver entry it generates.
 	require.NoError(t, unstructured.SetNestedSlice(provider.Object,
-		[]any{archiverPluginConfiguration("orders-seaweedfs")}, "spec", "plugins"))
+		[]any{archiverPluginConfiguration("seaweedfs", "orders-uid-1")}, "spec", "plugins"))
 	require.NoError(t, a.Passthrough())
 	spec := provider.Object
 
@@ -155,7 +155,8 @@ func TestPassthroughMergesStorageAndPlugins(t *testing.T) {
 	barman, ok := plugins[0].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, true, barman["isWALArchiver"])
-	assert.Equal(t, map[string]any{"barmanObjectName": "orders-seaweedfs", "serverName": "orders-v2"}, barman["parameters"])
+	assert.Equal(t, true, barman["enabled"])
+	assert.Equal(t, map[string]any{parameterBarmanObjectName: "seaweedfs", parameterServerName: "orders-uid-1"}, barman[fieldParameters])
 }
 
 // [CUSTOM CNPG] Hai nguồn cùng đặt một field khác giá trị thì phải lỗi và nêu đúng path — không được
@@ -200,9 +201,19 @@ func TestPassthroughRejectsConflicts(t *testing.T) {
 		a, provider := newPassthroughApplier(t,
 			`{"plugins": [{"name": "barman-cloud.cloudnative-pg.io", "parameters": {"barmanObjectName": "other"}}]}`, nil)
 		require.NoError(t, unstructured.SetNestedSlice(provider.Object,
-			[]any{archiverPluginConfiguration("orders-seaweedfs")}, "spec", "plugins"))
+			[]any{archiverPluginConfiguration("seaweedfs", "orders-uid-1")}, "spec", "plugins"))
 		require.ErrorContains(t, a.Passthrough(),
 			"spec.cnpg.plugins[name=barman-cloud.cloudnative-pg.io].parameters.barmanObjectName")
+	})
+
+	// serverName là ranh giới duy nhất giữa các cụm trong store dùng chung. Chặn cả khi Everest không
+	// sinh entry plugin nào (backup tắt) — không có gì để "xung đột" nhưng vẫn ghi được vào thư mục
+	// của cụm khác.
+	t.Run("serverName do nguoi dung dat khi backup tat", func(t *testing.T) {
+		t.Parallel()
+		a, _ := newPassthroughApplier(t,
+			`{"plugins": [{"name": "barman-cloud.cloudnative-pg.io", "isWALArchiver": true, "parameters": {"barmanObjectName": "seaweedfs", "serverName": "victim-uid"}}]}`, nil)
+		require.ErrorContains(t, a.Passthrough(), "is owned by Everest")
 	})
 
 	t.Run("externalCluster trung ten voi entry Everest sinh", func(t *testing.T) {

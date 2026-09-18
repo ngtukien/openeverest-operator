@@ -29,7 +29,6 @@ import (
 
 	everestv1alpha1 "github.com/percona/everest-operator/api/everest/v1alpha1"
 	"github.com/percona/everest-operator/internal/consts"
-	"github.com/percona/everest-operator/internal/controller/everest/common"
 )
 
 const (
@@ -38,6 +37,10 @@ const (
 	// ScheduleNameLabel is the label used to associate backups with a schedule.
 	ScheduleNameLabel = "everest.percona.com/backup-schedule"
 )
+
+// ErrStorageUnsupported marks a BackupStorage that CloudNativePG backups cannot use. Other engines
+// may still use it, so callers outside the CNPG provider treat it as "no shared store", not a failure.
+var ErrStorageUnsupported = errors.New("BackupStorage is not supported by CloudNativePG backups")
 
 var (
 	// BackupGVK is the GroupVersionKind for CloudNativePG Backup CRD.
@@ -48,9 +51,10 @@ var (
 
 // BarmanObjectStore [CUSTOM CNPG] chuyển đổi cấu hình Everest BackupStorage thành spec
 // "barmanObjectStore" chuẩn của CloudNativePG:
-// - destinationPath: đường dẫn s3://<bucket>/<prefix> hoặc Azure URL
-// - s3Credentials / azureCredentials: ánh xạ các key từ Secret (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
-// - endpointURL: hỗ trợ S3-compatible như MinIO, SeaweedFS, Ceph RGW.
+//   - destinationPath: gốc bucket s3://<bucket> hoặc Azure URL — mỗi cụm tách thư mục bằng serverName
+//     (ServerName), không bằng prefix trong đường dẫn, vì store được dùng chung
+//   - s3Credentials / azureCredentials: ánh xạ các key từ Secret (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+//   - endpointURL: hỗ trợ S3-compatible như MinIO, SeaweedFS, Ceph RGW.
 //
 // Tham số regionSecretName là tên Secret DO EVEREST SỞ HỮU, chứa key AWS_REGION. Nó tồn tại vì barman chỉ
 // nhận region qua secret reference (`s3Credentials.region` là SecretKeySelector, không có trường
@@ -60,16 +64,14 @@ var (
 // "missing key AWS_REGION, inside secret" và chỉ lộ ra lúc archive, không phải lúc apply.
 func BarmanObjectStore(
 	storage *everestv1alpha1.BackupStorage,
-	db *everestv1alpha1.DatabaseCluster,
 	regionSecretName string,
 ) (map[string]any, error) {
 	if storage.Spec.ForcePathStyle != nil && *storage.Spec.ForcePathStyle {
-		return nil, errors.New("CloudNativePG in-tree backups do not support forcePathStyle")
+		return nil, fmt.Errorf("%w: forcePathStyle is not supported", ErrStorageUnsupported)
 	}
 	if storage.Spec.VerifyTLS != nil && !*storage.Spec.VerifyTLS {
-		return nil, errors.New("CloudNativePG backups require TLS verification; verifyTLS=false is not supported")
+		return nil, fmt.Errorf("%w: TLS verification is required; verifyTLS=false is not supported", ErrStorageUnsupported)
 	}
-	prefix := strings.Trim(common.BackupStoragePrefix(db), "/")
 	secret := storage.Spec.CredentialsSecretName
 	result := map[string]any{}
 	if storage.Spec.EndpointURL != "" {
@@ -77,7 +79,7 @@ func BarmanObjectStore(
 	}
 	switch storage.Spec.Type {
 	case everestv1alpha1.BackupStorageTypeS3:
-		result["destinationPath"] = fmt.Sprintf("s3://%s/%s", strings.Trim(storage.Spec.Bucket, "/"), prefix)
+		result["destinationPath"] = "s3://" + strings.Trim(storage.Spec.Bucket, "/")
 		if storage.Spec.Region != "" {
 			result["s3Credentials"] = map[string]any{
 				"region":          map[string]any{fieldName: regionSecretName, fieldKey: regionSecretKey},
@@ -92,15 +94,15 @@ func BarmanObjectStore(
 		}
 	case everestv1alpha1.BackupStorageTypeAzure:
 		if storage.Spec.EndpointURL == "" {
-			return nil, errors.New("Azure BackupStorage.endpointURL is required for CloudNativePG")
+			return nil, fmt.Errorf("%w: Azure BackupStorage.endpointURL is required", ErrStorageUnsupported)
 		}
-		result["destinationPath"] = fmt.Sprintf("%s/%s/%s", strings.TrimRight(storage.Spec.EndpointURL, "/"), strings.Trim(storage.Spec.Bucket, "/"), prefix)
+		result["destinationPath"] = fmt.Sprintf("%s/%s", strings.TrimRight(storage.Spec.EndpointURL, "/"), strings.Trim(storage.Spec.Bucket, "/"))
 		result["azureCredentials"] = map[string]any{
 			"storageAccount": map[string]any{"name": secret, "key": "AZURE_STORAGE_ACCOUNT_NAME"},
 			"storageKey":     map[string]any{"name": secret, "key": "AZURE_STORAGE_ACCOUNT_KEY"},
 		}
 	default:
-		return nil, fmt.Errorf("unsupported CloudNativePG backup storage type %q", storage.Spec.Type)
+		return nil, fmt.Errorf("%w: storage type %q", ErrStorageUnsupported, storage.Spec.Type)
 	}
 	return result, nil
 }

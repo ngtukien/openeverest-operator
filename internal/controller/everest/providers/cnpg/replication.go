@@ -18,10 +18,12 @@ package cnpg
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -61,13 +63,13 @@ func (a *applier) Replication() error {
 			if err := a.reconcilePublication(pub); err != nil {
 				return fmt.Errorf("reconcile Publication %q: %w", pub.Name, err)
 			}
-			desiredPublications[a.DB.Name+"-"+pub.Name] = struct{}{}
+			desiredPublications[replicationObjectName(a.DB.Name, pub.Name)] = struct{}{}
 		}
 		for _, sub := range replication.Subscriptions {
 			if err := a.reconcileSubscription(sub); err != nil {
 				return fmt.Errorf("reconcile Subscription %q: %w", sub.Name, err)
 			}
-			desiredSubscriptions[a.DB.Name+"-"+sub.Name] = struct{}{}
+			desiredSubscriptions[replicationObjectName(a.DB.Name, sub.Name)] = struct{}{}
 		}
 	}
 
@@ -78,6 +80,32 @@ func (a *applier) Replication() error {
 		return fmt.Errorf("prune Subscriptions: %w", err)
 	}
 	return nil
+}
+
+// subscriptionNamePattern là luật tên replication slot của PostgreSQL. CREATE SUBSCRIPTION mặc định tạo
+// slot trên publisher TRÙNG TÊN subscription, nên tên subscription phải hợp lệ làm tên slot — quote
+// identifier chỉ cứu được tên subscription, không cứu được tên slot. Tối đa NAMEDATALEN-1 byte.
+var subscriptionNamePattern = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
+
+// ValidateSubscriptionName báo lỗi khi tên subscription không dùng được làm tên replication slot.
+// Webhook gọi để chặn lúc apply; reconcile gọi lại vì webhook có thể đang tắt.
+func ValidateSubscriptionName(name string) error {
+	if !subscriptionNamePattern.MatchString(name) {
+		return fmt.Errorf("subscription name %q must contain only lowercase letters, digits and underscores "+
+			"(max 63): PostgreSQL uses it as the replication slot name on the publisher", name)
+	}
+	return nil
+}
+
+// k8sName đổi tên PostgreSQL (thường có gạch dưới) thành dạng hợp lệ cho tên object Kubernetes.
+func k8sName(pgName string) string {
+	return strings.ReplaceAll(strings.ToLower(pgName), "_", "-")
+}
+
+// replicationObjectName là tên CR Publication/Subscription: "<cụm>-<tên>". Tên PostgreSQL giữ
+// nguyên trong spec.name; chỉ tên object Kubernetes (DNS subdomain, không nhận gạch dưới) bị đổi.
+func replicationObjectName(dbName, pgName string) string {
+	return dbName + "-" + k8sName(pgName)
 }
 
 func (a *applier) reconcilePublication(pub everestv1alpha1.ReplicationPublication) error {
@@ -99,7 +127,10 @@ func (a *applier) reconcilePublication(pub everestv1alpha1.ReplicationPublicatio
 		target = map[string]any{"objects": objects}
 	}
 
-	object := newUnstructured(PublicationGVK, a.DB.Namespace, a.DB.Name+"-"+pub.Name)
+	object := newUnstructured(PublicationGVK, a.DB.Namespace, replicationObjectName(a.DB.Name, pub.Name))
+	if err := a.deleteIfImmutableChanged(object, pub.Name, pub.DBName); err != nil {
+		return err
+	}
 	_, err := controllerutil.CreateOrUpdate(a.ctx, a.C, object, func() error {
 		object.SetLabels(map[string]string{ReplicationOwnerLabel: a.DB.Name})
 		object.Object["spec"] = map[string]any{
@@ -117,6 +148,9 @@ func (a *applier) reconcileSubscription(sub everestv1alpha1.ReplicationSubscript
 	if sub.Name == "" || sub.DBName == "" || sub.PublicationName == "" {
 		return errors.New("subscription name, dbName and publicationName are required")
 	}
+	if err := ValidateSubscriptionName(sub.Name); err != nil {
+		return err
+	}
 	source := sub.Source
 	if source.Host == "" || source.DBName == "" || source.User == "" || source.PasswordSecretName == "" {
 		return errors.New("source.host, source.dbName, source.user and source.passwordSecretName are required")
@@ -133,7 +167,7 @@ func (a *applier) reconcileSubscription(sub everestv1alpha1.ReplicationSubscript
 	if secretKey == "" {
 		secretKey = corev1.BasicAuthPasswordKey
 	}
-	externalClusterName := sub.Name + "-source"
+	externalClusterName := k8sName(sub.Name) + "-source"
 	externalCluster := map[string]any{
 		"name": externalClusterName,
 		"connectionParameters": map[string]any{
@@ -149,7 +183,10 @@ func (a *applier) reconcileSubscription(sub everestv1alpha1.ReplicationSubscript
 		return err
 	}
 
-	object := newUnstructured(SubscriptionGVK, a.DB.Namespace, a.DB.Name+"-"+sub.Name)
+	object := newUnstructured(SubscriptionGVK, a.DB.Namespace, replicationObjectName(a.DB.Name, sub.Name))
+	if err := a.deleteIfImmutableChanged(object, sub.Name, sub.DBName); err != nil {
+		return err
+	}
 	_, err := controllerutil.CreateOrUpdate(a.ctx, a.C, object, func() error {
 		object.SetLabels(map[string]string{ReplicationOwnerLabel: a.DB.Name})
 		object.Object["spec"] = map[string]any{
@@ -162,6 +199,37 @@ func (a *applier) reconcileSubscription(sub everestv1alpha1.ReplicationSubscript
 		return controllerutil.SetControllerReference(a.DB, object, a.C.Scheme())
 	})
 	return err
+}
+
+// errReplicationObjectRecreating báo CR đang được xoá để tạo lại; vòng reconcile sau sẽ tạo mới.
+var errReplicationObjectRecreating = errors.New("recreating because an immutable field changed; retrying")
+
+// deleteIfImmutableChanged xoá CR Publication/Subscription khi spec.name hoặc spec.dbname — hai field
+// CNPG khoá bằng CEL "self == oldSelf" — khác giá trị mong muốn. Update thẳng sẽ bị API server từ
+// chối mãi. Ví dụ: đổi "trove-sub" (tên slot không hợp lệ) thành "trove_sub" cho ra CÙNG tên CR.
+//
+// Xoá CR không xoá object trong PostgreSQL khi reclaim policy là retain (mặc định của CNPG).
+func (a *applier) deleteIfImmutableChanged(object *unstructured.Unstructured, pgName, dbName string) error {
+	existing := newUnstructured(object.GroupVersionKind(), object.GetNamespace(), object.GetName())
+	err := a.C.Get(a.ctx, client.ObjectKeyFromObject(existing), existing)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !existing.GetDeletionTimestamp().IsZero() {
+		return fmt.Errorf("%s %q: %w", object.GetKind(), object.GetName(), errReplicationObjectRecreating)
+	}
+	currentName, _, _ := unstructured.NestedString(existing.Object, "spec", "name")
+	currentDB, _, _ := unstructured.NestedString(existing.Object, "spec", "dbname")
+	if currentName == pgName && currentDB == dbName {
+		return nil
+	}
+	if err := a.C.Delete(a.ctx, existing); client.IgnoreNotFound(err) != nil {
+		return err
+	}
+	return fmt.Errorf("%s %q: %w", object.GetKind(), object.GetName(), errReplicationObjectRecreating)
 }
 
 // mergeExternalCluster inserts or replaces a spec.externalClusters entry by name, without

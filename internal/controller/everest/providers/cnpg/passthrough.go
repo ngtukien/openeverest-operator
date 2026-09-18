@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	everestv1alpha1 "github.com/percona/everest-operator/api/everest/v1alpha1"
+	"github.com/percona/everest-operator/internal/consts"
 )
 
 // OwnedSpecPaths are the CloudNativePG Cluster spec paths Everest always generates from
@@ -44,6 +45,29 @@ var OwnedSpecPaths = []struct {
 	// In-tree Barman: CNPG rejects it next to the plugin WAL archiver Everest configures, and it
 	// cannot run on the `standard` operand images of the ClusterImageCatalog (see objectstore.go).
 	{Path: []string{"backup", "barmanObjectStore"}, EverestPath: "spec.backup.schedules and the BackupStorage's spec.objectStore"},
+}
+
+// OwnedPluginParameters returns the spec.cnpg paths where the user sets a Barman Cloud Plugin
+// parameter Everest owns. The barmanObjectName parameter picks the BackupStorage's shared
+// ObjectStore and serverName is the only boundary between clusters inside it, so a user-chosen value could write
+// WAL into another cluster's folder. This holds even when Everest generates no plugin entry
+// (backups disabled), which is why it is checked separately from the merge.
+func OwnedPluginParameters(user map[string]any) []string {
+	plugins, _ := user["plugins"].([]any)
+	var paths []string
+	for _, raw := range plugins {
+		entry, _ := raw.(map[string]any)
+		if name, _ := entry[fieldName].(string); name != consts.BarmanCloudPluginName {
+			continue
+		}
+		parameters, _ := entry[fieldParameters].(map[string]any)
+		for _, key := range []string{parameterBarmanObjectName, parameterServerName} {
+			if _, found := parameters[key]; found {
+				paths = append(paths, fmt.Sprintf("plugins[name=%s].parameters.%s", consts.BarmanCloudPluginName, key))
+			}
+		}
+	}
+	return paths
 }
 
 // Compile-time check: the controller only runs Passthrough() through this optional interface, so a
@@ -70,6 +94,9 @@ func (a *applier) Passthrough() error {
 			return fmt.Errorf("spec.cnpg.%s is owned by Everest; set %s instead",
 				strings.Join(owned.Path, "."), owned.EverestPath)
 		}
+	}
+	if paths := OwnedPluginParameters(user); len(paths) > 0 {
+		return fmt.Errorf("spec.cnpg.%s is owned by Everest; it is generated from spec.backup and the BackupStorage", paths[0])
 	}
 	generated, ok := a.Object["spec"].(map[string]any)
 	if !ok {

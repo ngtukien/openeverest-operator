@@ -147,6 +147,7 @@ func (v *DatabaseClusterValidator) ValidateCreate(ctx context.Context, db *evere
 	if db.Spec.Replication != nil && !isCNPG {
 		allErrs = append(allErrs, field.Forbidden(dbcReplicationPath, "replication is only supported by the CloudNativePG provider"))
 	}
+	allErrs = append(allErrs, validateReplicationNames(db)...)
 	// [CUSTOM CNPG] spec.cnpg passthrough, xem PLAN.md Phase 12.
 	allErrs = append(allErrs, validateCNPGPassthrough(db, isCNPG)...)
 
@@ -207,6 +208,7 @@ func (v *DatabaseClusterValidator) ValidateUpdate(ctx context.Context, oldDb, ne
 	if newDb.Spec.Replication != nil && !isCNPG {
 		allErrs = append(allErrs, field.Forbidden(dbcReplicationPath, "replication is only supported by the CloudNativePG provider"))
 	}
+	allErrs = append(allErrs, validateReplicationNames(newDb)...)
 	// [CUSTOM CNPG] spec.cnpg passthrough, xem PLAN.md Phase 12.
 	allErrs = append(allErrs, validateCNPGPassthrough(newDb, isCNPG)...)
 	if isCNPG {
