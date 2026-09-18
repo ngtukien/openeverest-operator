@@ -341,11 +341,12 @@ ENVTEST_K8S_VERSION = 1.30
 KUBEBUILDER_VERSION = v4.9.0
 
 .PHONY: kustomize
-KUSTOMIZE_INSTALL_SCRIPT = "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh"
 KUSTOMIZE = $(LOCALBIN)/kustomize-$(KUSTOMIZE_VERSION)
+# Cài qua Go module proxy như controller-gen. install_kustomize.sh (nhánh master) tải tarball từ
+# GitHub Releases; khi GitHub trả trang lỗi thay cho file, tar báo "not in gzip format" và job fail.
 kustomize: $(LOCALBIN) ## Download kustomize locally if necessary.
 ifeq (,$(wildcard $(KUSTOMIZE)))
-	curl -Ss $(KUSTOMIZE_INSTALL_SCRIPT) | bash -s -- $(subst v,,$(KUSTOMIZE_VERSION)) $(LOCALBIN)
+	GOBIN=$(LOCALBIN) go install sigs.k8s.io/kustomize/kustomize/v5@$(KUSTOMIZE_VERSION)
 	mv $(LOCALBIN)/kustomize $(KUSTOMIZE)
 endif
 
