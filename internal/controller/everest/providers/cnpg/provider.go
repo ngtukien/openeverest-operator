@@ -953,6 +953,10 @@ func (b *inputsBuilder) checkReplica() error {
 		return fmt.Errorf("source %q: host or cluster is required for a replica", src.name)
 	case src.passwordSecret != "" && (src.clientCertSecret != "" || src.caSecret != ""):
 		return fmt.Errorf("source %q: password and certificate authentication are exclusive", src.name)
+	case src.passwordSecret != "" && src.user == "":
+		return fmt.Errorf("source %q: user with the REPLICATION privilege is required for password authentication", src.name)
+	case src.passwordSecret == "" && src.cluster == "":
+		return fmt.Errorf("source %q: password-secret is required for a replica of a PostgreSQL outside CloudNativePG", src.name)
 	}
 	return nil
 }

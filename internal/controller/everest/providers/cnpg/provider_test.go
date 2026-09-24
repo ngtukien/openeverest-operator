@@ -765,6 +765,8 @@ func TestParseInputsRejects(t *testing.T) {
 		"undefined source":        {"subscription.sub.dbname", "app", "subscription.sub.publication", "p", "subscription.sub.source", "nope"},
 		"source without password": {"source.s.host", "h", "source.s.dbname", "d", "source.s.user", "u", "schema-import-source", "s"},
 		"replica-enabled alone":   {"replica-enabled", "false"},
+		"replica without user":    {"source.old.host", "h", "source.old.password-secret", "s", "replica-source", "old"},
+		"replica without auth":    {"source.old.host", "h", "source.old.user", "u", "replica-source", "old"},
 		"replica and import":      append(legacySource, "replica-source", "legacy", "schema-import-source", "legacy"),
 		"mixed replica auth": {
 			"source.a.cluster", "orders", "source.a.password-secret", "s", "source.a.ca-secret", "ca", "replica-source", "a",
@@ -879,4 +881,27 @@ func TestValidateCreateAnnotations(t *testing.T) {
 	db.Annotations = annotations(append(legacySource, "schema-import-source", "legacy")...)
 	db.Spec.DataSource = &everestv1alpha1.DataSource{DBClusterBackupName: "nightly"}
 	assert.Len(t, ValidateCreate(context.Background(), c, db), 1)
+}
+
+func TestReplicaFromExternalPostgres(t *testing.T) {
+	t.Parallel()
+	db := testDB("14.24")
+	db.Annotations = annotations(
+		"source.trove.host", "192.168.250.1",
+		"source.trove.user", "db_user",
+		"source.trove.sslmode", "disable",
+		"source.trove.password-secret", "source-postgres-credentials",
+		"replica-source", "trove",
+	)
+	a, _ := newTestApplier(t, db, nil, userSecret("orders_owner", ""))
+	a.in, a.inErr = parseInputs(db.Annotations)
+	require.NoError(t, a.inErr)
+	require.NoError(t, a.Engine())
+	require.NoError(t, a.DataSource())
+	entry := nested(t, a.Object, "spec", "externalClusters").([]any)[0].(map[string]any) //nolint:forcetypeassert
+	assert.Equal(t, map[string]any{
+		"host": "192.168.250.1", "port": "5432", "dbname": "postgres", "user": "db_user", "sslmode": "disable",
+	}, entry["connectionParameters"])
+	assert.Equal(t, map[string]any{"name": "source-postgres-credentials", "key": "password"}, entry["password"])
+	assert.Equal(t, map[string]any{"enabled": true, "source": "source-trove"}, nested(t, a.Object, "spec", "replica"))
 }

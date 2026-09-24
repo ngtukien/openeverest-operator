@@ -1190,12 +1190,13 @@ func (a *applier) externalCluster(src *source) map[string]any {
 	}
 	parameters["sslmode"] = sslMode
 	parameters["dbname"] = src.dbname
+	if src.dbname == "" {
+		// Streaming replication does not use a database; pg_basebackup still needs one to connect.
+		parameters["dbname"] = defaultReplicaDBName
+	}
 	parameters["user"] = src.user
 
 	if certAuth {
-		if src.dbname == "" {
-			parameters["dbname"] = defaultReplicaDBName
-		}
 		if src.user == "" {
 			parameters["user"] = defaultReplicaUser
 		}
