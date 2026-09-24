@@ -42,6 +42,8 @@ const (
 	PSMDBDeploymentName = "percona-server-mongodb-operator"
 	// PGDeploymentName is the name of the Percona PostgreSQL operator deployment.
 	PGDeploymentName = "percona-postgresql-operator"
+	// CNPGDeploymentName is the name of the CloudNativePG DatabaseEngine.
+	CNPGDeploymentName = "cnpg-controller-manager"
 
 	// PXCAPIGroup is the API group for Percona XtraDB Cluster.
 	PXCAPIGroup = "pxc.percona.com"
