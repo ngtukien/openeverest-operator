@@ -457,8 +457,9 @@ type recoverySource struct {
 // recoveryTarget builds the CNPG recoveryTarget.
 //   - no PITR: stop at the end of the chosen backup (targetImmediate);
 //   - PITR latest: no target, replay all WAL;
-//   - PITR date: stop at that time, which must lie between the backup end and the latest
-//     restorable time when the backup is known.
+//   - PITR date: stop at that time, which can not be before the end of the backup. An upper
+//     bound is only checked when latestRestorableTime was measured; otherwise CNPG reports a
+//     target beyond the archived WAL.
 func recoveryTarget(pitr *everestv1alpha1.PITR, backup *everestv1alpha1.DatabaseClusterBackup, backupID string) (map[string]any, error) {
 	if pitr == nil {
 		if backupID == "" {

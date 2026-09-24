@@ -180,13 +180,11 @@ func BackupStatus(
 		if parsed, err := time.Parse(time.RFC3339, stoppedAt); err == nil {
 			completedAt := metav1.NewTime(parsed)
 			status.CompletedAt = &completedAt
-			// The end of the backup is a lower bound; keep a more accurate value set by someone else.
-			status.LatestRestorableTime = backup.Status.LatestRestorableTime
-			if status.LatestRestorableTime == nil {
-				status.LatestRestorableTime = &completedAt
-			}
 		}
 	}
+	// WAL keeps being archived after the backup ends, so its end is not the latest restorable
+	// time. Only keep a value somebody measured (the recovery window of the ObjectStore).
+	status.LatestRestorableTime = backup.Status.LatestRestorableTime
 
 	destinationPath, _, _ := unstructured.NestedString(upstream.Object, "status", "destinationPath")
 	serverName, _, _ := unstructured.NestedString(upstream.Object, "status", "serverName")
