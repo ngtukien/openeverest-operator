@@ -769,6 +769,7 @@ spec:
                     - pxc
                     - postgresql
                     - psmdb
+                    - cnpg
                     type: string
                     x-kubernetes-validations:
                     - message: .spec.engine.type cannot be changed
@@ -9160,6 +9161,18 @@ rules:
   - list
   - watch
 - apiGroups:
+  - barmancloud.cnpg.io
+  resources:
+  - objectstores
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - batch
   resources:
   - jobs
@@ -9294,6 +9307,44 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - policy
+  resources:
+  - poddisruptionbudgets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - postgresql.cnpg.io
+  resources:
+  - backups
+  - clusters
+  - databases
+  - poolers
+  - publications
+  - scheduledbackups
+  - subscriptions
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - postgresql.cnpg.io
+  resources:
+  - clusterimagecatalogs
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - psmdb.percona.com

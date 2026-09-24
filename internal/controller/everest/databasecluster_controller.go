@@ -51,6 +51,7 @@ import (
 	"github.com/percona/everest-operator/internal/consts"
 	"github.com/percona/everest-operator/internal/controller/everest/common"
 	"github.com/percona/everest-operator/internal/controller/everest/providers"
+	"github.com/percona/everest-operator/internal/controller/everest/providers/cnpg"
 	"github.com/percona/everest-operator/internal/controller/everest/providers/pg"
 	"github.com/percona/everest-operator/internal/controller/everest/providers/psmdb"
 	"github.com/percona/everest-operator/internal/controller/everest/providers/pxc"
@@ -115,6 +116,7 @@ var (
 	_ dbProvider = (*pxc.Provider)(nil)
 	_ dbProvider = (*pg.Provider)(nil)
 	_ dbProvider = (*psmdb.Provider)(nil)
+	_ dbProvider = (*cnpg.Provider)(nil)
 )
 
 //nolint:ireturn
@@ -134,6 +136,8 @@ func (r *DatabaseClusterReconciler) newDBProvider(
 		return pg.New(ctx, opts)
 	case everestv1alpha1.DatabaseEnginePSMDB:
 		return psmdb.New(ctx, opts)
+	case everestv1alpha1.DatabaseEngineCNPG:
+		return cnpg.New(ctx, opts)
 	default:
 		return nil, fmt.Errorf("unsupported engine type %s", engineType)
 	}
@@ -1097,6 +1101,10 @@ func (r *DatabaseClusterReconciler) ReconcileWatchers(ctx context.Context) error
 			}
 		case everestv1alpha1.DatabaseEnginePSMDB:
 			if err := addWatcher(t, &psmdbv1.PerconaServerMongoDB{}); err != nil {
+				return err
+			}
+		case everestv1alpha1.DatabaseEngineCNPG:
+			if err := addWatcher(t, cnpg.EmptyClusterObject()); err != nil {
 				return err
 			}
 		default:

@@ -46,6 +46,7 @@ import (
 	everestv1alpha1 "github.com/percona/everest-operator/api/everest/v1alpha1"
 	"github.com/percona/everest-operator/internal/consts"
 	"github.com/percona/everest-operator/internal/controller/everest/common"
+	"github.com/percona/everest-operator/internal/controller/everest/providers/cnpg"
 	"github.com/percona/everest-operator/internal/controller/everest/version"
 	"github.com/percona/everest-operator/internal/predicates"
 )
@@ -61,6 +62,7 @@ var operatorEngine = map[string]everestv1alpha1.EngineType{
 	consts.PXCDeploymentName:   everestv1alpha1.DatabaseEnginePXC,
 	consts.PSMDBDeploymentName: everestv1alpha1.DatabaseEnginePSMDB,
 	consts.PGDeploymentName:    everestv1alpha1.DatabaseEnginePostgresql,
+	consts.CNPGDeploymentName:  everestv1alpha1.DatabaseEngineCNPG,
 }
 
 // DatabaseEngineReconciler reconciles a DatabaseEngine object.
@@ -109,6 +111,24 @@ func (r *DatabaseEngineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return nil
 	}); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// CloudNativePG is installed cluster-wide outside OLM and publishes its versions through a
+	// ClusterImageCatalog, so the Percona operator checks below do not apply. Its Deployment lives
+	// outside the watched namespaces, hence the periodic requeue.
+	if engineType == everestv1alpha1.DatabaseEngineCNPG {
+		state, version, versions, err := cnpg.EngineStatus(ctx, r.Client)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		dbEngine.Status = everestv1alpha1.DatabaseEngineStatus{State: state, OperatorVersion: version, AvailableVersions: versions}
+		if err := r.Status().Update(ctx, dbEngine); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.reconcileWatchers(ctx); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to reconcile watchers: %w", err)
+		}
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
 	pendingUpgrades, err := r.listPendingOperatorUpgrades(ctx, dbEngine)
