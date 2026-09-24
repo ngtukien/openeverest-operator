@@ -20,7 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TOOLS_PATH: "/opt/tools/bin"
-      IMAGE_PREFIX: 'ghcr.io/openeverest'
+      # Fork push vào namespace của chính nó; GITHUB_TOKEN không có quyền trên ghcr.io/openeverest.
+      IMAGE_PREFIX: 'ghcr.io/${{ github.repository_owner }}'
       EVEREST_OPERATOR_DEV_IMAGE_NAME: 'openeverest-operator-dev'
       EVEREST_OPERATOR_BUNDLE_DEV_IMAGE_NAME: 'openeverest-operator-bundle-dev'
 
@@ -48,8 +49,10 @@ jobs:
         with:
           images: |
             ${{ env.IMAGE_PREFIX }}/${{ env.EVEREST_OPERATOR_DEV_IMAGE_NAME }}
+          # 0.0.0 bị ghi đè mỗi lần build; tag theo commit để deploy trỏ đúng một bản dựng.
           tags: |
             type=raw,value=0.0.0,enable=${{ contains(github.ref_name, 'main') }}
+            type=sha,prefix=,format=short
 
       - name: Docker bundle meta
         id: bundle_meta
