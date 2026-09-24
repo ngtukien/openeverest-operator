@@ -51,6 +51,7 @@ import (
 	everestv1alpha1 "github.com/percona/everest-operator/api/everest/v1alpha1"
 	"github.com/percona/everest-operator/internal/consts"
 	"github.com/percona/everest-operator/internal/controller/everest/common"
+	"github.com/percona/everest-operator/internal/controller/everest/providers/cnpg"
 )
 
 const (
@@ -130,6 +131,8 @@ func (r *DatabaseClusterBackupReconciler) Reconcile(ctx context.Context, req ctr
 		requeue, err = r.reconcilePSMDB(ctx, backup)
 	case everestv1alpha1.DatabaseEnginePostgresql:
 		requeue, err = r.reconcilePG(ctx, backup)
+	case everestv1alpha1.DatabaseEngineCNPG:
+		requeue, err = cnpg.ReconcileBackup(ctx, r.Client, backup)
 	}
 
 	if err != nil {
@@ -176,6 +179,12 @@ func (r *DatabaseClusterBackupReconciler) ReconcileWatchers(ctx context.Context)
 			}
 		case everestv1alpha1.DatabaseEnginePSMDB:
 			if err := addWatcher(t, &psmdbv1.PerconaServerMongoDBBackup{}, r.tryCreatePSMDB); err != nil {
+				return err
+			}
+		case everestv1alpha1.DatabaseEngineCNPG:
+			if err := addWatcher(t, cnpg.EmptyBackupObject(), func(ctx context.Context, obj client.Object) error {
+				return cnpg.AdoptBackup(ctx, r.Client, obj)
+			}); err != nil {
 				return err
 			}
 		default:
@@ -346,6 +355,9 @@ func (r *DatabaseClusterBackupReconciler) getBackupStatus(
 	if !backup.GetDeletionTimestamp().IsZero() {
 		backupStatus.State = everestv1alpha1.BackupDeleting
 		return backupStatus, nil
+	}
+	if db.Spec.Engine.Type == everestv1alpha1.DatabaseEngineCNPG {
+		return cnpg.BackupStatus(ctx, r.Client, backup)
 	}
 
 	switch db.Spec.Engine.Type {

@@ -40,6 +40,7 @@ import (
 	everestv1alpha1 "github.com/percona/everest-operator/api/everest/v1alpha1"
 	"github.com/percona/everest-operator/internal/consts"
 	"github.com/percona/everest-operator/internal/controller/everest/common"
+	"github.com/percona/everest-operator/internal/controller/everest/providers/cnpg"
 )
 
 var (
@@ -99,6 +100,11 @@ func (v *DatabaseClusterValidator) ValidateCreate(ctx context.Context, db *evere
 
 	logger.Info("Validation for DatabaseCluster upon creation")
 
+	isCNPG := db.Spec.Engine.Type == everestv1alpha1.DatabaseEngineCNPG
+	if isCNPG {
+		allErrs = append(allErrs, cnpg.ValidateCreate(ctx, v.Client, db)...)
+	}
+
 	// Validate the engine version
 	if errs := v.validateEngineVersion(ctx, db); errs != nil {
 		allErrs = append(allErrs, errs...)
@@ -117,7 +123,7 @@ func (v *DatabaseClusterValidator) ValidateCreate(ctx context.Context, db *evere
 	}
 
 	// If a data import source is specified, validate it.
-	if di := pointer.Get(db.Spec.DataSource).DataImport; di != nil {
+	if di := pointer.Get(db.Spec.DataSource).DataImport; di != nil && !isCNPG {
 		if errs := v.validateDataImport(ctx, db); errs != nil {
 			allErrs = append(allErrs, errs...)
 		}
@@ -159,6 +165,10 @@ func (v *DatabaseClusterValidator) ValidateUpdate(ctx context.Context, oldDb, ne
 		return nil, apierrors.NewInvalid(dbClusterGroupKind, oldDb.GetName(), field.ErrorList{
 			errImmutableField(dbcEngineTypePath),
 		})
+	}
+
+	if newDb.Spec.Engine.Type == everestv1alpha1.DatabaseEngineCNPG {
+		allErrs = append(allErrs, cnpg.ValidateUpdate(ctx, v.Client, oldDb, newDb)...)
 	}
 
 	// Validate the engine version

@@ -272,7 +272,7 @@ func (r *Resources) ToResourceRequirements() corev1.ResourceRequirements {
 // Engine is the engine configuration.
 type Engine struct {
 	// Type is the engine type
-	// +kubebuilder:validation:Enum:=pxc;postgresql;psmdb
+	// +kubebuilder:validation:Enum:=pxc;postgresql;psmdb;cnpg
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message=".spec.engine.type cannot be changed"
 	Type EngineType `json:"type"`
 	// Version is the engine version

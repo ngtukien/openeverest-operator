@@ -40,6 +40,8 @@ const (
 	DatabaseEnginePSMDB EngineType = "psmdb"
 	// DatabaseEnginePostgresql represents engine type for Postgresql clusters.
 	DatabaseEnginePostgresql EngineType = "postgresql"
+	// DatabaseEngineCNPG represents engine type for CloudNativePG clusters.
+	DatabaseEngineCNPG EngineType = "cnpg"
 
 	// DBEngineComponentRecommended represents recommended component status.
 	DBEngineComponentRecommended ComponentStatus = "recommended"
