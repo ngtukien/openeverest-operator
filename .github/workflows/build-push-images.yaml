@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+  # Chạy tay: gh workflow run build-push-images.yaml -R ngtukien/openeverest-operator
+  workflow_dispatch:
 
 permissions:
   contents: read
