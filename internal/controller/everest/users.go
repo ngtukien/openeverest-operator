@@ -24,9 +24,25 @@ var userSecretKeys = map[everestv1alpha1.EngineType][]everestv1alpha1.SecretKey{
 	// not supported until K8SPG-570 is fixed.
 	// See - https://perconadev.atlassian.net/browse/K8SPG-570
 	everestv1alpha1.DatabaseEnginePostgresql: {},
+	everestv1alpha1.DatabaseEngineCNPG:       cnpgUserKeys,
 }
 
 var (
+	cnpgUserKeys = []everestv1alpha1.SecretKey{
+		{
+			Name:        "username",
+			Description: "Application user, owner of the application database",
+		},
+		{
+			Name:        "password",
+			Description: "Password of the application user",
+		},
+		{
+			Name:        "database",
+			Description: "Application database (optional, defaults to app)",
+		},
+	}
+
 	pxcUserKeys = []everestv1alpha1.SecretKey{
 		{
 			Name:        "monitor",

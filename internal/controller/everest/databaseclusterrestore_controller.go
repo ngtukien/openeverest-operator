@@ -48,6 +48,7 @@ import (
 	everestv1alpha1 "github.com/percona/everest-operator/api/everest/v1alpha1"
 	"github.com/percona/everest-operator/internal/consts"
 	"github.com/percona/everest-operator/internal/controller/everest/common"
+	"github.com/percona/everest-operator/internal/controller/everest/providers/cnpg"
 )
 
 const (
@@ -118,7 +119,7 @@ func (r *DatabaseClusterRestoreReconciler) Reconcile(ctx context.Context, req ct
 
 	defer func() {
 		// Update the status and finalizers of the DatabaseClusterRestore object after the reconciliation.
-		err = r.reconcileStatus(ctx, dbcr, dbc.Spec.Engine.Type)
+		err = r.reconcileStatus(ctx, dbcr, dbc)
 		if err != nil {
 			logger.Error(err, "failed to update DatabaseClusterRestore status")
 		}
@@ -143,6 +144,11 @@ func (r *DatabaseClusterRestoreReconciler) Reconcile(ctx context.Context, req ct
 	case everestv1alpha1.DatabaseEnginePostgresql:
 		if needRequeue, err = r.restorePG(ctx, dbcr); err != nil {
 			logger.Error(err, "failed to restore PG Cluster")
+			return ctrl.Result{}, err
+		}
+	case everestv1alpha1.DatabaseEngineCNPG:
+		if needRequeue, err = cnpg.ReconcileRestore(dbcr, dbc); err != nil {
+			logger.Error(err, "failed to restore CNPG Cluster")
 			return ctrl.Result{}, err
 		}
 	}
@@ -211,6 +217,9 @@ func (r *DatabaseClusterRestoreReconciler) ReconcileWatchers(ctx context.Context
 			if err := addWatcher(t, &psmdbv1.PerconaServerMongoDBRestore{}, nil); err != nil {
 				return err
 			}
+		case everestv1alpha1.DatabaseEngineCNPG:
+			// CNPG has no restore resource: a restore is the bootstrap of a new Cluster.
+			continue
 		default:
 			logger.Info("Unknown database engine type", "type", dbEngine.Spec.Type)
 			continue
@@ -252,10 +261,11 @@ func (r *DatabaseClusterRestoreReconciler) reconcileMeta(
 func (r *DatabaseClusterRestoreReconciler) reconcileStatus(
 	ctx context.Context,
 	dbcr *everestv1alpha1.DatabaseClusterRestore,
-	engineType everestv1alpha1.EngineType,
+	db *everestv1alpha1.DatabaseCluster,
 ) error {
 	logger := log.FromContext(ctx)
 	var err error
+	engineType := db.Spec.Engine.Type
 
 	// Nothing to process on delete events
 	if !dbcr.GetDeletionTimestamp().IsZero() {
@@ -263,6 +273,9 @@ func (r *DatabaseClusterRestoreReconciler) reconcileStatus(
 	}
 
 	dbcrStatus := everestv1alpha1.DatabaseClusterRestoreStatus{}
+	if engineType == everestv1alpha1.DatabaseEngineCNPG {
+		dbcrStatus = cnpg.RestoreStatus(dbcr, db)
+	}
 	upstreamRestoreName := client.ObjectKeyFromObject(dbcr)
 	switch engineType {
 	case everestv1alpha1.DatabaseEnginePXC:
