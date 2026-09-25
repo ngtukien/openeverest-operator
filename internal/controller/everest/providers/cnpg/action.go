@@ -388,8 +388,11 @@ func ReconcileSharedObjectStore(ctx context.Context, c client.Client, storage *e
 		// The plugin retention is a time-based recovery window, not "keep N copies".
 		"retentionPolicy": retentionPolicy(),
 		"instanceSidecarConfiguration": map[string]any{
+			// An explicit CPU limit: without it a namespace LimitRange default applies (500m in
+			// the DBaaS tenants), and every instance costs that much more ResourceQuota than the
+			// platform plans for.
 			"resources": map[string]any{
-				"limits":   map[string]any{"memory": "256Mi"},
+				"limits":   map[string]any{"cpu": "200m", "memory": "256Mi"},
 				"requests": map[string]any{"cpu": "30m", "memory": "128Mi"},
 			},
 		},

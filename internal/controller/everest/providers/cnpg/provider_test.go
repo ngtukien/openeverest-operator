@@ -291,6 +291,9 @@ func TestBackup(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(store), store))
 	assert.Equal(t, "s3://backups", nested(t, store.Object, "spec", "configuration", "destinationPath"))
 	assert.Equal(t, "14d", nested(t, store.Object, "spec", "retentionPolicy"))
+	assert.Equal(t, map[string]any{"cpu": "200m", "memory": "256Mi"},
+		nested(t, store.Object, "spec", "instanceSidecarConfiguration", "resources", "limits"),
+		"explicit CPU limit, not the namespace LimitRange default")
 	assert.Equal(t, testStorage+"-region",
 		nested(t, store.Object, "spec", "configuration", "s3Credentials", "region", "name"))
 
