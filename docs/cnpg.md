@@ -58,6 +58,7 @@ tiền tố `cnpg.everest.io/`, key dạng `<loại>.<tên>.<trường>`. Key l�
 | `schema-import-source` | `<src>` | `initdb.import` schema-only cho database ứng dụng |
 | `replica-source` | `<src>` | `bootstrap.pg_basebackup` (database/owner/secret lấy từ user Secret) + `replica`; owner không được gán `dbaas_admin_role` vì bản clone không chạy initdb |
 | `replica-enabled` | `true` (mặc định) / `false` = promote | `replica.enabled` |
+| `replication-expose` | CIDR, phân tách bằng dấu phẩy | Service LoadBalancer `<tên>-rw-replication` thẳng tới primary (bỏ qua PgBouncer, vốn không mang giao thức replication), `loadBalancerSourceRanges` = các CIDR; owner có `REPLICATION`. Dùng cho subscriber ngoài cụm, ví dụ nguồn migration đồng bộ ngược. Gỡ annotation là thu hồi cả hai |
 
 `Database`, `Publication`, `Subscription` thuộc sở hữu DatabaseCluster và mang nhãn
 `everest.percona.com/database-cluster`; gỡ annotation là xoá CR tương ứng. `dataSource`,

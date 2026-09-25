@@ -265,20 +265,42 @@ func (a *applier) Proxy() error {
 	if err := a.reconcilePoolers(serviceTemplate); err != nil {
 		return err
 	}
-	if poolerEnabled(a.DB) || serviceTemplate == nil {
-		return nil
-	}
-	return unstructured.SetNestedSlice(a.Object, []any{
-		map[string]any{
+	var additional []any
+	if !poolerEnabled(a.DB) && serviceTemplate != nil {
+		additional = append(additional, map[string]any{
 			"selectorType":    "rw",
 			"updateStrategy":  "patch",
 			"serviceTemplate": serviceTemplate,
-		},
-	}, "spec", "managed", "services", "additional")
+		})
+	}
+	if len(a.in.replicationExpose) != 0 {
+		additional = append(additional, map[string]any{
+			"selectorType":   "rw",
+			"updateStrategy": "patch",
+			"serviceTemplate": map[string]any{
+				"metadata": map[string]any{"name": replicationServiceName(a.DB.GetName())},
+				"spec": map[string]any{
+					"type":                     string(corev1.ServiceTypeLoadBalancer),
+					"externalTrafficPolicy":    string(corev1.ServiceExternalTrafficPolicyLocal),
+					"loadBalancerSourceRanges": toAnySlice(a.in.replicationExpose),
+				},
+			},
+		})
+	}
+	if len(additional) == 0 {
+		return nil
+	}
+	return unstructured.SetNestedSlice(a.Object, additional, "spec", "managed", "services", "additional")
 }
 
 func externalServiceName(dbName string) string {
 	return dbName + "-rw-external"
+}
+
+// replicationServiceName is the LoadBalancer of AnnotationReplicationExpose: straight to the
+// primary, bypassing PgBouncer.
+func replicationServiceName(dbName string) string {
+	return dbName + "-rw-replication"
 }
 
 // Monitoring fails when PMM monitoring is requested; CNPG metrics are exported natively.
@@ -622,11 +644,12 @@ func (a *applier) setBootstrapAndRoles(spec map[string]any, major uint64) (strin
 		}
 	}
 	role := map[string]any{
-		"name":            owner,
-		"ensure":          "present",
-		"login":           true,
-		"superuser":       false,
-		"replication":     false,
+		"name":      owner,
+		"ensure":    "present",
+		"login":     true,
+		"superuser": false,
+		// A subscriber outside the cluster (replication-expose) logs in as the owner.
+		"replication":     len(a.in.replicationExpose) != 0,
 		"bypassrls":       false,
 		"createdb":        false,
 		"createrole":      major >= minPGMajorForRoleDelegation,

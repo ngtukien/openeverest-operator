@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
 	"sort"
 	"strconv"
@@ -693,6 +694,9 @@ func validateProxy(proxy everestv1alpha1.Proxy) field.ErrorList {
 //	                               reclaim-policy ("retain" or "delete")
 //	schema-import-source           <src> to import the schema of the application database from
 //	replica-source                 <src> to replicate from; replica-enabled "false" promotes
+//	replication-expose             CIDRs allowed to reach the primary directly for logical
+//	                               replication (e.g. a migration source subscribing back);
+//	                               also grants REPLICATION to the owner
 const (
 	// AnnotationPrefix starts every annotation of the CNPG provider.
 	AnnotationPrefix = "cnpg.everest.io/"
@@ -707,6 +711,10 @@ const (
 	AnnotationReplicaSource = AnnotationPrefix + "replica-source"
 	// AnnotationReplicaEnabled keeps the cluster a replica ("true", default); "false" promotes it.
 	AnnotationReplicaEnabled = AnnotationPrefix + "replica-enabled"
+	// AnnotationReplicationExpose is a comma-separated list of CIDRs that may open replication
+	// connections to the primary through a dedicated LoadBalancer. PgBouncer can not carry the
+	// replication protocol, so a subscriber outside the cluster needs this path.
+	AnnotationReplicationExpose = AnnotationPrefix + "replication-expose"
 
 	// ExtensionTimescaleDB is the AnnotationExtension value for TimescaleDB.
 	ExtensionTimescaleDB = "timescaledb"
@@ -775,6 +783,8 @@ type inputs struct {
 	schemaImportSource string
 	replicaSource      string
 	replicaEnabled     bool
+	// replicationExpose lists the CIDRs of AnnotationReplicationExpose; empty = not exposed.
+	replicationExpose []string
 }
 
 // parseInputs reads the annotations of the CNPG provider. Unknown keys are rejected, so a typo
@@ -826,6 +836,15 @@ func (b *inputsBuilder) add(key, value string) error {
 			return fmt.Errorf("%s: must be true or false", key)
 		}
 		b.in.replicaEnabled, b.replicaEnabledSet = enabled, true
+		return nil
+	case AnnotationReplicationExpose:
+		for cidr := range strings.SplitSeq(value, ",") {
+			cidr = strings.TrimSpace(cidr)
+			if _, _, err := net.ParseCIDR(cidr); err != nil {
+				return fmt.Errorf("%s: %q is not a CIDR", key, cidr)
+			}
+			b.in.replicationExpose = append(b.in.replicationExpose, cidr)
+		}
 		return nil
 	}
 

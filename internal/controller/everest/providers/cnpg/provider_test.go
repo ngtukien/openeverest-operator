@@ -916,3 +916,52 @@ func TestReplicaFromExternalPostgres(t *testing.T) {
 	assert.NotContains(t, role, "inRoles")
 	assert.Equal(t, map[string]any{"name": testUserSecret}, role["passwordSecret"])
 }
+
+func TestReplicationExpose(t *testing.T) {
+	t.Parallel()
+	db := testDB("14.24")
+	db.Annotations = annotations(
+		"source.trove.host", "192.168.250.1",
+		"source.trove.user", "db_user",
+		"source.trove.password-secret", "source-postgres-credentials",
+		"replica-source", "trove",
+		"replica-enabled", "false",
+		"replication-expose", "192.168.250.1/32, 10.0.0.0/24",
+	)
+	db.Spec.Proxy = everestv1alpha1.Proxy{
+		Type: everestv1alpha1.ProxyTypePGBouncer, Replicas: pointer.ToInt32(1), Config: "pool_mode = session",
+		Expose: everestv1alpha1.Expose{Type: everestv1alpha1.ExposeTypeLoadBalancer},
+	}
+	a, _ := newTestApplier(t, db, nil, userSecret("orders_owner", ""))
+	a.in, a.inErr = parseInputs(db.Annotations)
+	require.NoError(t, a.inErr)
+	require.NoError(t, a.Engine())
+	require.NoError(t, a.Proxy())
+
+	// The pooler keeps its own Service; the only additional one goes straight to the primary.
+	additional := nested(t, a.Object, "spec", "managed", "services", "additional").([]any) //nolint:forcetypeassert
+	require.Len(t, additional, 1)
+	svc := additional[0].(map[string]any) //nolint:forcetypeassert
+	assert.Equal(t, "rw", svc["selectorType"])
+	template := svc["serviceTemplate"].(map[string]any) //nolint:forcetypeassert
+	assert.Equal(t, map[string]any{"name": "orders-rw-replication"}, template["metadata"])
+	assert.Equal(t, []any{"192.168.250.1/32", "10.0.0.0/24"}, nested(t, template, "spec", "loadBalancerSourceRanges"))
+	assert.Equal(t, "LoadBalancer", nested(t, template, "spec", "type"))
+
+	role := nested(t, a.Object, "spec", "managed", "roles").([]any)[0].(map[string]any) //nolint:forcetypeassert
+	assert.Equal(t, true, role["replication"], "the subscriber logs in as the owner")
+
+	// Removing the annotation takes both away.
+	delete(db.Annotations, AnnotationReplicationExpose)
+	a.in, a.inErr = parseInputs(db.Annotations)
+	require.NoError(t, a.inErr)
+	require.NoError(t, a.Engine())
+	require.NoError(t, a.Proxy())
+	_, found, _ := unstructured.NestedSlice(a.Object, "spec", "managed", "services", "additional")
+	assert.False(t, found)
+	role = nested(t, a.Object, "spec", "managed", "roles").([]any)[0].(map[string]any) //nolint:forcetypeassert
+	assert.Equal(t, false, role["replication"])
+
+	_, err := parseInputs(annotations("replication-expose", "not-a-cidr"))
+	require.Error(t, err)
+}
