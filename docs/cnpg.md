@@ -56,7 +56,7 @@ tiền tố `cnpg.everest.io/`, key dạng `<loại>.<tên>.<trường>`. Key l�
 | `publication.<pub>.dbname`, `.tables` | `.tables` là `*` (mặc định) hoặc `schema.table,...` | CR `Publication` |
 | `subscription.<sub>.dbname`, `.publication`, `.source`, `.reclaim-policy` | `reclaim-policy`: `retain`\|`delete` | CR `Subscription`; `<sub>` cũng là tên replication slot |
 | `schema-import-source` | `<src>` | `initdb.import` schema-only cho database ứng dụng |
-| `replica-source` | `<src>` | `bootstrap.pg_basebackup` + `replica` |
+| `replica-source` | `<src>` | `bootstrap.pg_basebackup` (database/owner/secret lấy từ user Secret) + `replica`; owner không được gán `dbaas_admin_role` vì bản clone không chạy initdb |
 | `replica-enabled` | `true` (mặc định) / `false` = promote | `replica.enabled` |
 
 `Database`, `Publication`, `Subscription` thuộc sở hữu DatabaseCluster và mang nhãn

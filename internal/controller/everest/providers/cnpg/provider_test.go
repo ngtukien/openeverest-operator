@@ -846,8 +846,10 @@ func TestReplicaCluster(t *testing.T) {
 	require.NoError(t, a.Engine())
 	require.NoError(t, a.DataSource())
 
-	assert.Equal(t, map[string]any{"pg_basebackup": map[string]any{"source": "source-zone-a"}},
-		nested(t, a.Object, "spec", "bootstrap"))
+	assert.Equal(t, map[string]any{"pg_basebackup": map[string]any{
+		"source": "source-zone-a", "database": "app", "owner": "orders_owner",
+		"secret": map[string]any{"name": testUserSecret},
+	}}, nested(t, a.Object, "spec", "bootstrap"), "no initdb; the application database comes from the user Secret")
 	assert.Equal(t, map[string]any{"enabled": false, "source": "source-zone-a"}, nested(t, a.Object, "spec", "replica"))
 	entry := nested(t, a.Object, "spec", "externalClusters").([]any)[0].(map[string]any) //nolint:forcetypeassert
 	assert.Equal(t, map[string]any{
@@ -904,4 +906,10 @@ func TestReplicaFromExternalPostgres(t *testing.T) {
 	}, entry["connectionParameters"])
 	assert.Equal(t, map[string]any{"name": "source-postgres-credentials", "key": "password"}, entry["password"])
 	assert.Equal(t, map[string]any{"enabled": true, "source": "source-trove"}, nested(t, a.Object, "spec", "replica"))
+
+	// The clone has no admin role (initdb never ran): granting it would stall role reconciliation.
+	role := nested(t, a.Object, "spec", "managed", "roles").([]any)[0].(map[string]any) //nolint:forcetypeassert
+	assert.Equal(t, "orders_owner", role["name"])
+	assert.NotContains(t, role, "inRoles")
+	assert.Equal(t, map[string]any{"name": testUserSecret}, role["passwordSecret"])
 }

@@ -621,23 +621,29 @@ func (a *applier) setBootstrapAndRoles(spec map[string]any, major uint64) (strin
 			"source":     map[string]any{"externalCluster": externalClusterName(a.in.schemaImportSource)},
 		}
 	}
-	spec["bootstrap"] = map[string]any{"initdb": initdb}
-	spec["managed"] = map[string]any{
-		"roles": []any{map[string]any{
-			"name":            owner,
-			"ensure":          "present",
-			"login":           true,
-			"superuser":       false,
-			"replication":     false,
-			"bypassrls":       false,
-			"createdb":        false,
-			"createrole":      major >= minPGMajorForRoleDelegation,
-			"inherit":         true,
-			"connectionLimit": int64(-1),
-			"inRoles":         []any{adminRoleName},
-			"passwordSecret":  map[string]any{"name": secretName},
-		}},
+	role := map[string]any{
+		"name":            owner,
+		"ensure":          "present",
+		"login":           true,
+		"superuser":       false,
+		"replication":     false,
+		"bypassrls":       false,
+		"createdb":        false,
+		"createrole":      major >= minPGMajorForRoleDelegation,
+		"inherit":         true,
+		"connectionLimit": int64(-1),
+		"inRoles":         []any{adminRoleName},
+		"passwordSecret":  map[string]any{"name": secretName},
 	}
+	if a.in.replicaSource == "" {
+		spec["bootstrap"] = map[string]any{"initdb": initdb}
+	} else {
+		// A replica is cloned by pg_basebackup (DataSource): initdb and its postInitSQL never run,
+		// so the admin role does not exist and granting it would stall CNPG's role reconciler,
+		// and with it the pooler auth user, once the replica is promoted.
+		delete(role, "inRoles")
+	}
+	spec["managed"] = map[string]any{"roles": []any{role}}
 	return owner, nil
 }
 
@@ -1231,8 +1237,20 @@ func (a *applier) replicaCluster() error {
 		return err
 	}
 	name := externalClusterName(src.name)
+	basebackup := map[string]any{"source": name}
+	if secretName := a.DB.Spec.Engine.UserSecretsName; secretName != "" {
+		// Without these CNPG defaults to database and owner "app", and after the promotion
+		// fails to set the password of a role the clone does not have.
+		owner, database, err := a.readUserSecret(secretName)
+		if err != nil {
+			return err
+		}
+		basebackup["database"] = database
+		basebackup["owner"] = owner
+		basebackup["secret"] = map[string]any{"name": secretName}
+	}
 	if err := unstructured.SetNestedMap(a.Object, map[string]any{
-		"pg_basebackup": map[string]any{"source": name},
+		"pg_basebackup": basebackup,
 	}, "spec", "bootstrap"); err != nil {
 		return err
 	}
