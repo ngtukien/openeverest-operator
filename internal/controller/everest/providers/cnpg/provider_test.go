@@ -177,6 +177,20 @@ func TestEngine(t *testing.T) {
 	assert.False(t, found, "no WAL volume unless the operator is configured for it")
 }
 
+func TestEnginePrimaryUpdateMethod(t *testing.T) {
+	t.Parallel()
+	a, _ := newTestApplier(t, testDB("16.4"), nil, userSecret("orders_owner", ""))
+	require.NoError(t, a.Engine())
+	assert.Equal(t, "switchover", nested(t, a.Object, "spec", "primaryUpdateMethod"))
+
+	// One instance: no switchover target, so restart PostgreSQL in place instead of recreating the Pod.
+	db := testDB("16.4")
+	db.Spec.Engine.Replicas = 1
+	a, _ = newTestApplier(t, db, nil, userSecret("orders_owner", ""))
+	require.NoError(t, a.Engine())
+	assert.Equal(t, "restart", nested(t, a.Object, "spec", "primaryUpdateMethod"))
+}
+
 func TestEnginePG14SkipsRoleDelegation(t *testing.T) {
 	t.Parallel()
 	db := testDB("14.24")

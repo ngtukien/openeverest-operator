@@ -135,9 +135,16 @@ func (a *applier) Engine() error {
 		return fmt.Errorf("invalid PostgreSQL version %q: %w", engine.Version, err)
 	}
 
+	// switchover needs a second instance. With one instance CNPG falls back to deleting and
+	// recreating the primary Pod for every restart-only change (e.g. archive_mode flipping from
+	// "always" to "on" when a replica cluster is promoted); "restart" restarts PostgreSQL in place.
+	primaryUpdateMethod := "switchover"
+	if engine.Replicas == 1 {
+		primaryUpdateMethod = "restart"
+	}
 	spec := map[string]any{
 		"instances":             int64(engine.Replicas),
-		"primaryUpdateMethod":   "switchover",
+		"primaryUpdateMethod":   primaryUpdateMethod,
 		"primaryUpdateStrategy": "unsupervised",
 		"enableSuperuserAccess": false,
 	}
