@@ -1267,6 +1267,14 @@ func (a *applier) replicaCluster() error {
 		return err
 	}
 	name := externalClusterName(src.name)
+	if a.in.replicaCheckpoint != "" {
+		annotations := a.Unstructured.GetAnnotations()
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[CNPGCheckpointAnnotation] = a.in.replicaCheckpoint
+		a.Unstructured.SetAnnotations(annotations)
+	}
 	basebackup := map[string]any{"source": name}
 	if secretName := a.DB.Spec.Engine.UserSecretsName; secretName != "" {
 		// Without these CNPG defaults to database and owner "app", and after the promotion

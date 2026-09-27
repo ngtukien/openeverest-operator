@@ -694,6 +694,7 @@ func validateProxy(proxy everestv1alpha1.Proxy) field.ErrorList {
 //	                               reclaim-policy ("retain" or "delete")
 //	schema-import-source           <src> to import the schema of the application database from
 //	replica-source                 <src> to replicate from; replica-enabled "false" promotes
+//	replica-checkpoint             "fast" or "spread" for the initial pg_basebackup
 //	replication-expose             CIDRs allowed to reach the primary directly for logical
 //	                               replication (e.g. a migration source subscribing back);
 //	                               also grants REPLICATION to the owner
@@ -711,6 +712,10 @@ const (
 	AnnotationReplicaSource = AnnotationPrefix + "replica-source"
 	// AnnotationReplicaEnabled keeps the cluster a replica ("true", default); "false" promotes it.
 	AnnotationReplicaEnabled = AnnotationPrefix + "replica-enabled"
+	// AnnotationReplicaCheckpoint sets the initial pg_basebackup checkpoint mode.
+	AnnotationReplicaCheckpoint = AnnotationPrefix + "replica-checkpoint"
+	// CNPGCheckpointAnnotation is read by the DBaaS CNPG manager in the bootstrap Job.
+	CNPGCheckpointAnnotation = "dbaas.viettel.vn/pgbasebackup-checkpoint"
 	// AnnotationReplicationExpose is a comma-separated list of CIDRs that may open replication
 	// connections to the primary through a dedicated LoadBalancer. PgBouncer can not carry the
 	// replication protocol, so a subscriber outside the cluster needs this path.
@@ -783,6 +788,7 @@ type inputs struct {
 	schemaImportSource string
 	replicaSource      string
 	replicaEnabled     bool
+	replicaCheckpoint  string
 	// replicationExpose lists the CIDRs of AnnotationReplicationExpose; empty = not exposed.
 	replicationExpose []string
 }
@@ -829,6 +835,12 @@ func (b *inputsBuilder) add(key, value string) error {
 		return nil
 	case AnnotationReplicaSource:
 		b.in.replicaSource = value
+		return nil
+	case AnnotationReplicaCheckpoint:
+		if value != "fast" && value != "spread" {
+			return fmt.Errorf("%s: must be fast or spread", key)
+		}
+		b.in.replicaCheckpoint = value
 		return nil
 	case AnnotationReplicaEnabled:
 		enabled, err := strconv.ParseBool(value)
@@ -956,6 +968,9 @@ func (b *inputsBuilder) build() (inputs, error) {
 func (b *inputsBuilder) checkReplica() error {
 	in := b.in
 	if in.replicaSource == "" {
+		if in.replicaCheckpoint != "" {
+			return fmt.Errorf("%s requires %s", AnnotationReplicaCheckpoint, AnnotationReplicaSource)
+		}
 		if b.replicaEnabledSet {
 			return fmt.Errorf("%s requires %s", AnnotationReplicaEnabled, AnnotationReplicaSource)
 		}

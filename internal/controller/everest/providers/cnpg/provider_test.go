@@ -911,6 +911,7 @@ func TestReplicaFromExternalPostgres(t *testing.T) {
 		"source.trove.sslmode", "disable",
 		"source.trove.password-secret", "source-postgres-credentials",
 		"replica-source", "trove",
+		"replica-checkpoint", "fast",
 	)
 	a, _ := newTestApplier(t, db, nil, userSecret("orders_owner", ""))
 	a.in, a.inErr = parseInputs(db.Annotations)
@@ -923,6 +924,7 @@ func TestReplicaFromExternalPostgres(t *testing.T) {
 	}, entry["connectionParameters"])
 	assert.Equal(t, map[string]any{"name": "source-postgres-credentials", "key": "password"}, entry["password"])
 	assert.Equal(t, map[string]any{"enabled": true, "source": "source-trove"}, nested(t, a.Object, "spec", "replica"))
+	assert.Equal(t, "fast", a.Unstructured.GetAnnotations()[CNPGCheckpointAnnotation])
 
 	// The clone has no admin role (initdb never ran): granting it would stall role reconciliation.
 	role := nested(t, a.Object, "spec", "managed", "roles").([]any)[0].(map[string]any) //nolint:forcetypeassert
@@ -978,4 +980,16 @@ func TestReplicationExpose(t *testing.T) {
 
 	_, err := parseInputs(annotations("replication-expose", "not-a-cidr"))
 	require.Error(t, err)
+}
+
+func TestReplicaCheckpointAnnotationValidation(t *testing.T) {
+	t.Parallel()
+	for _, annotations := range []map[string]string{
+		{AnnotationReplicaCheckpoint: "fast"},
+		{AnnotationReplicaSource: "origin", AnnotationReplicaCheckpoint: "immediate"},
+	} {
+		if _, err := parseInputs(annotations); err == nil {
+			t.Fatalf("expected invalid checkpoint annotation to fail: %v", annotations)
+		}
+	}
 }
