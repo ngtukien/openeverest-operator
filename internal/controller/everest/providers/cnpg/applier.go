@@ -31,6 +31,7 @@ import (
 	"github.com/AlekSi/pointer"
 	"github.com/Masterminds/semver/v3"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -72,6 +73,9 @@ const (
 	// Label that makes CNPG watch a Secret it does not own, so password changes reach
 	// PostgreSQL through managed.roles.
 	cnpgReloadLabel = "cnpg.io/reload"
+	// Labels CNPG puts on every pod: the cluster name and the role (instance or pooler).
+	cnpgClusterLabel = "cnpg.io/cluster"
+	cnpgPodRoleLabel = "cnpg.io/podRole"
 	// Optional key of the user Secret that names the application database.
 	userSecretDatabaseKey = "database"
 	// First PostgreSQL major with createrole_self_grant and
@@ -283,6 +287,9 @@ func (a *applier) Proxy() error {
 	if err := a.reconcilePoolers(serviceTemplate); err != nil {
 		return err
 	}
+	if err := a.reconcileReplicationNetworkPolicy(); err != nil {
+		return err
+	}
 	var additional []any
 	if !poolerEnabled(a.DB) && serviceTemplate != nil {
 		additional = append(additional, map[string]any{
@@ -309,6 +316,55 @@ func (a *applier) Proxy() error {
 		return nil
 	}
 	return unstructured.SetNestedSlice(a.Object, additional, "spec", "managed", "services", "additional")
+}
+
+// replicationNetworkPolicyName is the NetworkPolicy that lets the CIDRs of
+// AnnotationReplicationExpose reach the instances: a default-deny namespace otherwise drops the
+// subscriber even though the LoadBalancer accepts it.
+func replicationNetworkPolicyName(dbName string) string {
+	return dbName + "-replication"
+}
+
+// reconcileReplicationNetworkPolicy opens PostgreSQL on the instances of this cluster to the
+// CIDRs of AnnotationReplicationExpose only, and removes the opening with the annotation. It
+// selects every instance, not the primary alone: the replication Service follows the primary
+// across failovers. The Service keeps the client source IP (externalTrafficPolicy: Local), so the
+// ipBlock matches the subscriber itself.
+func (a *applier) reconcileReplicationNetworkPolicy() error {
+	policy := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{
+		Name:      replicationNetworkPolicyName(a.DB.GetName()),
+		Namespace: a.DB.GetNamespace(),
+	}}
+	if len(a.in.replicationExpose) == 0 {
+		if err := a.C.Delete(a.ctx, policy); client.IgnoreNotFound(err) != nil {
+			return fmt.Errorf("delete NetworkPolicy %q: %w", policy.GetName(), err)
+		}
+		return nil
+	}
+	peers := make([]networkingv1.NetworkPolicyPeer, 0, len(a.in.replicationExpose))
+	for _, cidr := range a.in.replicationExpose {
+		peers = append(peers, networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: cidr}})
+	}
+	port := intstr.FromInt32(postgresPort)
+	tcp := corev1.ProtocolTCP
+	if _, err := controllerutil.CreateOrUpdate(a.ctx, a.C, policy, func() error {
+		policy.Labels = map[string]string{consts.DatabaseClusterNameLabel: a.DB.GetName()}
+		policy.Spec = networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{
+				cnpgClusterLabel: a.DB.GetName(),
+				cnpgPodRoleLabel: "instance",
+			}},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{{
+				From:  peers,
+				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &port}},
+			}},
+		}
+		return controllerutil.SetControllerReference(a.DB, policy, a.C.Scheme())
+	}); err != nil {
+		return fmt.Errorf("reconcile NetworkPolicy %q: %w", policy.GetName(), err)
+	}
+	return nil
 }
 
 func externalServiceName(dbName string) string {

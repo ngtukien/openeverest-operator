@@ -25,7 +25,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -997,6 +999,22 @@ func TestReplicationExpose(t *testing.T) {
 	assert.Equal(t, []any{"192.168.250.1/32", "10.0.0.0/24"}, nested(t, template, "spec", "loadBalancerSourceRanges"))
 	assert.Equal(t, "LoadBalancer", nested(t, template, "spec", "type"))
 
+	// A default-deny namespace would drop the subscriber: only the exposed CIDRs are let in.
+	policy := &networkingv1.NetworkPolicy{}
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "orders-replication"}, policy))
+	assert.Equal(t, map[string]string{"cnpg.io/cluster": "orders", "cnpg.io/podRole": "instance"}, policy.Spec.PodSelector.MatchLabels)
+	assert.Equal(t, []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}, policy.Spec.PolicyTypes)
+	require.Len(t, policy.Spec.Ingress, 1)
+	var cidrs []string
+	for _, peer := range policy.Spec.Ingress[0].From {
+		cidrs = append(cidrs, peer.IPBlock.CIDR)
+	}
+	assert.Equal(t, []string{"192.168.250.1/32", "10.0.0.0/24"}, cidrs)
+	require.Len(t, policy.Spec.Ingress[0].Ports, 1)
+	assert.Equal(t, int32(5432), policy.Spec.Ingress[0].Ports[0].Port.IntVal)
+	require.Len(t, policy.OwnerReferences, 1)
+	assert.Equal(t, db.GetName(), policy.OwnerReferences[0].Name)
+
 	// The subscriber logs in as a platform role, never as the owner.
 	roles := nested(t, a.Object, "spec", "managed", "roles").([]any) //nolint:forcetypeassert
 	require.Len(t, roles, 2)
@@ -1032,6 +1050,8 @@ func TestReplicationExpose(t *testing.T) {
 	require.NoError(t, a.Proxy())
 	_, found, _ := unstructured.NestedSlice(a.Object, "spec", "managed", "services", "additional")
 	assert.False(t, found)
+	err := c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "orders-replication"}, policy)
+	assert.True(t, apierrors.IsNotFound(err), "the NetworkPolicy goes with the annotation: %v", err)
 	roles = nested(t, a.Object, "spec", "managed", "roles").([]any) //nolint:forcetypeassert
 	require.Len(t, roles, 2)
 	assert.Equal(t, false, roles[0].(map[string]any)["replication"]) //nolint:forcetypeassert
@@ -1043,7 +1063,7 @@ func TestReplicationExpose(t *testing.T) {
 	roles = nested(t, a.Object, "spec", "managed", "roles").([]any) //nolint:forcetypeassert
 	assert.Equal(t, map[string]any{"name": "dbaas_replicator", "ensure": "absent"}, roles[1])
 
-	_, err := parseInputs(annotations("replication-expose", "not-a-cidr"))
+	_, err = parseInputs(annotations("replication-expose", "not-a-cidr"))
 	require.Error(t, err)
 }
 
