@@ -283,7 +283,9 @@ func (r *DatabaseClusterReconciler) reconcileDBStatus( //nolint:funcorder
 	}
 
 	dbStatus.ObservedGeneration = db.GetGeneration()
-	if reconcileErr != nil {
+	// A conflict only means another writer was first; the requeue settles it, so it is not
+	// reported as a failure.
+	if reconcileErr != nil && !k8serrors.IsConflict(reconcileErr) {
 		meta.SetStatusCondition(&dbStatus.Conditions, metav1.Condition{
 			Type:               everestv1alpha1.ConditionTypeReconcileFailed,
 			Status:             metav1.ConditionTrue,
@@ -291,7 +293,7 @@ func (r *DatabaseClusterReconciler) reconcileDBStatus( //nolint:funcorder
 			Message:            truncateConditionMessage(reconcileErr.Error()),
 			ObservedGeneration: db.GetGeneration(),
 		})
-	} else {
+	} else if reconcileErr == nil {
 		meta.RemoveStatusCondition(&dbStatus.Conditions, everestv1alpha1.ConditionTypeReconcileFailed)
 	}
 	// need to set dbStatus to DB because r.observeDataImportState enriches it.
