@@ -175,9 +175,18 @@ func (r *DatabaseClusterReconciler) reconcileDB(
 		return ctrl.Result{Requeue: !done}, client.IgnoreNotFound(updErr)
 	}
 
-	// Update the status of the DatabaseCluster object after the reconciliation.
+	// Update the status of the DatabaseCluster object after the reconciliation. A reconcile error
+	// wins over the status result: returning it logs it and requeues with backoff, and the status
+	// carries it as the ReconcileFailed condition.
 	defer func() {
-		rr, rerr = r.reconcileDBStatus(ctx, db, p)
+		statusResult, statusErr := r.reconcileDBStatus(ctx, db, p, rerr)
+		if rerr != nil {
+			if statusErr != nil {
+				logger.Error(statusErr, "failed to update the status after a reconcile error")
+			}
+			return
+		}
+		rr, rerr = statusResult, statusErr
 	}()
 
 	// Run pre-reconcile hook.
@@ -262,6 +271,7 @@ func (r *DatabaseClusterReconciler) reconcileDBStatus( //nolint:funcorder
 	ctx context.Context,
 	db *everestv1alpha1.DatabaseCluster,
 	p dbProvider,
+	reconcileErr error,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	namespacedName := client.ObjectKeyFromObject(db)
@@ -273,6 +283,17 @@ func (r *DatabaseClusterReconciler) reconcileDBStatus( //nolint:funcorder
 	}
 
 	dbStatus.ObservedGeneration = db.GetGeneration()
+	if reconcileErr != nil {
+		meta.SetStatusCondition(&dbStatus.Conditions, metav1.Condition{
+			Type:               everestv1alpha1.ConditionTypeReconcileFailed,
+			Status:             metav1.ConditionTrue,
+			Reason:             everestv1alpha1.ReasonReconcileError,
+			Message:            truncateConditionMessage(reconcileErr.Error()),
+			ObservedGeneration: db.GetGeneration(),
+		})
+	} else {
+		meta.RemoveStatusCondition(&dbStatus.Conditions, everestv1alpha1.ConditionTypeReconcileFailed)
+	}
 	// need to set dbStatus to DB because r.observeDataImportState enriches it.
 	db.Status = dbStatus
 	// if data import is set, we need to observe the state of the data import job.
@@ -304,6 +325,16 @@ func (r *DatabaseClusterReconciler) reconcileDBStatus( //nolint:funcorder
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// maxConditionMessageLength is the limit metav1.Condition puts on Message.
+const maxConditionMessageLength = 32768
+
+func truncateConditionMessage(message string) string {
+	if len(message) <= maxConditionMessageLength {
+		return message
+	}
+	return message[:maxConditionMessageLength]
 }
 
 func (r *DatabaseClusterReconciler) observeDataImportState(

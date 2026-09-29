@@ -574,6 +574,9 @@ const (
 	ConditionTypeVolumeResizeFailed = "VolumeResizeFailed"
 	// ConditionTypeImportFailed is a condition type that indicates that the data import failed.
 	ConditionTypeImportFailed = "ImportFailed"
+	// ConditionTypeReconcileFailed is a condition type that indicates that the last reconciliation
+	// failed, e.g. the API server rejected the upstream cluster.
+	ConditionTypeReconcileFailed = "ReconcileFailed"
 )
 
 const (
@@ -588,6 +591,8 @@ const (
 	ReasonVolumeResizeFailed = "VolumeResizeFailed"
 	// ReasonDataImportJobFailed is a reason for condition ConditionTypeImportFailed.
 	ReasonDataImportJobFailed = "DataImportJobFailed"
+	// ReasonReconcileError is a reason for condition ConditionTypeReconcileFailed.
+	ReasonReconcileError = "ReconcileError"
 )
 
 // DatabaseClusterStatus defines the observed state of DatabaseCluster.
