@@ -62,8 +62,10 @@ jobs:
         with:
           images: |
             ${{ env.IMAGE_PREFIX }}/${{ env.EVEREST_OPERATOR_BUNDLE_DEV_IMAGE_NAME }}
+          # Chạy tay trên nhánh khác main thì chỉ có tag commit; không có tag nào thì push lỗi.
           tags: |
             type=raw,value=0.0.0,enable=${{ contains(github.ref_name, 'main') }}
+            type=sha,prefix=,format=short
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
