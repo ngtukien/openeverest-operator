@@ -657,7 +657,7 @@ func validateProxy(proxy everestv1alpha1.Proxy) field.ErrorList {
 		allErrs = append(allErrs, field.NotSupported(proxyPath.Child("type"), proxy.Type,
 			[]string{string(everestv1alpha1.ProxyTypePGBouncer)}))
 	}
-	if _, err := ParsePoolMode(proxy.Config); err != nil {
+	if _, _, err := ParseProxyConfig(proxy.Config); err != nil {
 		allErrs = append(allErrs, field.Invalid(proxyPath.Child("config"), proxy.Config, err.Error()))
 	}
 	if proxy.Storage != nil {

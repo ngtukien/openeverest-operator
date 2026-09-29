@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1030,10 +1031,41 @@ func poolerEnabled(db *everestv1alpha1.DatabaseCluster) bool {
 	return db.Spec.Proxy.Type == everestv1alpha1.ProxyTypePGBouncer
 }
 
-// ParsePoolMode reads spec.proxy.config, which only accepts "pool_mode = session|transaction".
-// Exported for the validating webhook.
-func ParsePoolMode(config string) (string, error) {
+// proxyParameters are the PgBouncer settings spec.proxy.config may carry besides pool_mode,
+// with the check of their value. They size the pool and its TLS: a migration that moves clients
+// from a direct connection to the pooler sets them to what the source accepted.
+var proxyParameters = map[string]func(string) error{
+	"default_pool_size":  nonNegativeInt,
+	"min_pool_size":      nonNegativeInt,
+	"reserve_pool_size":  nonNegativeInt,
+	"max_client_conn":    nonNegativeInt,
+	"max_db_connections": nonNegativeInt,
+	"query_wait_timeout": nonNegativeInt,
+	"server_login_retry": nonNegativeInt,
+	"client_tls_sslmode": oneOf("disable", "allow", "prefer", "require", "verify-ca", "verify-full"),
+}
+
+func nonNegativeInt(value string) error {
+	if n, err := strconv.Atoi(value); err != nil || n < 0 {
+		return errors.New("must be a non-negative integer")
+	}
+	return nil
+}
+
+func oneOf(values ...string) func(string) error {
+	return func(value string) error {
+		if !slices.Contains(values, value) {
+			return fmt.Errorf("must be one of %s", strings.Join(values, ", "))
+		}
+		return nil
+	}
+}
+
+// ParseProxyConfig reads spec.proxy.config: "pool_mode = session|transaction" and the keys of
+// proxyParameters, one "key = value" per line. Exported for the validating webhook.
+func ParseProxyConfig(config string) (string, map[string]string, error) {
 	poolMode := poolModeSession
+	parameters := map[string]string{}
 	for line := range strings.SplitSeq(config, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
@@ -1041,37 +1073,47 @@ func ParsePoolMode(config string) (string, error) {
 		}
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
-			return "", fmt.Errorf("invalid spec.proxy.config line %q: expected key = value", line)
+			return "", nil, fmt.Errorf("invalid spec.proxy.config line %q: expected key = value", line)
 		}
 		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
-		if key != "pool_mode" {
-			return "", fmt.Errorf("unsupported key %q in spec.proxy.config: only pool_mode is supported", key)
+		if key == "pool_mode" {
+			if value != poolModeSession && value != poolModeTransaction {
+				return "", nil, fmt.Errorf("invalid pool_mode %q in spec.proxy.config: must be %q or %q",
+					value, poolModeSession, poolModeTransaction)
+			}
+			poolMode = value
+			continue
 		}
-		if value != poolModeSession && value != poolModeTransaction {
-			return "", fmt.Errorf("invalid pool_mode %q in spec.proxy.config: must be %q or %q",
-				value, poolModeSession, poolModeTransaction)
+		check, known := proxyParameters[key]
+		if !known {
+			return "", nil, fmt.Errorf("unsupported key %q in spec.proxy.config", key)
 		}
-		poolMode = value
+		if err := check(value); err != nil {
+			return "", nil, fmt.Errorf("invalid %s %q in spec.proxy.config: %w", key, value, err)
+		}
+		parameters[key] = value
 	}
-	return poolMode, nil
+	return poolMode, parameters, nil
 }
 
 // reconcilePoolers creates, updates or deletes the rw and ro Poolers. Poolers are owned by the
 // DatabaseCluster, so Kubernetes removes them together with the cluster.
 func (a *applier) reconcilePoolers(serviceTemplate map[string]any) error {
-	poolMode, err := ParsePoolMode(a.DB.Spec.Proxy.Config)
+	poolMode, userParameters, err := ParseProxyConfig(a.DB.Spec.Proxy.Config)
 	if err != nil {
 		return err
 	}
 	enabled := poolerEnabled(a.DB)
-	if err := a.reconcilePooler(poolerName(a.DB.GetName()), "rw", enabled, poolMode, serviceTemplate); err != nil {
+	if err := a.reconcilePooler(poolerName(a.DB.GetName()), "rw", enabled, poolMode, userParameters, serviceTemplate); err != nil {
 		return err
 	}
 	readEnabled := enabled && a.DB.Spec.Engine.Replicas >= minReplicasForReadPooler
-	return a.reconcilePooler(readPoolerName(a.DB.GetName()), "ro", readEnabled, poolMode, serviceTemplate)
+	return a.reconcilePooler(readPoolerName(a.DB.GetName()), "ro", readEnabled, poolMode, userParameters, serviceTemplate)
 }
 
-func (a *applier) reconcilePooler(name, selectorType string, enabled bool, poolMode string, serviceTemplate map[string]any) error {
+func (a *applier) reconcilePooler(name, selectorType string, enabled bool, poolMode string,
+	userParameters map[string]string, serviceTemplate map[string]any,
+) error {
 	object := newUnstructured(PoolerGVK, a.DB.GetNamespace(), name)
 	if !enabled {
 		if err := a.C.Delete(a.ctx, object); client.IgnoreNotFound(err) != nil {
@@ -1096,6 +1138,10 @@ func (a *applier) reconcilePooler(name, selectorType string, enabled bool, poolM
 	if serviceTemplate != nil {
 		// Outside the cluster TLS is mandatory; CNPG's default "prefer" would accept plaintext.
 		parameters["client_tls_sslmode"] = "require"
+	}
+	// The user wins over the defaults above, as for the PostgreSQL parameters.
+	for key, value := range userParameters {
+		parameters[key] = value
 	}
 	pgbouncer := map[string]any{"poolMode": poolMode, "parameters": parameters}
 	// The pgbouncer image comes from the ClusterImageCatalog, like the operand image.
@@ -1128,6 +1174,11 @@ func (a *applier) reconcilePooler(name, selectorType string, enabled bool, poolM
 	}
 
 	if _, err := controllerutil.CreateOrUpdate(a.ctx, a.C, object, func() error {
+		// spec.pgbouncer.paused is not Everest's: a migration pauses the pooler around its
+		// cutover (clients wait instead of failing). Rewriting the spec must not resume it.
+		if paused, found, _ := unstructured.NestedBool(object.Object, "spec", "pgbouncer", "paused"); found {
+			pgbouncer["paused"] = paused
+		}
 		object.Object["spec"] = spec
 		return controllerutil.SetControllerReference(a.DB, object, a.C.Scheme())
 	}); err != nil {

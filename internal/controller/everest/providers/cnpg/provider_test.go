@@ -450,13 +450,31 @@ func TestProxyPoolers(t *testing.T) {
 	assert.Equal(t, "require", nested(t, rw.Object, "spec", "pgbouncer", "parameters", "client_tls_sslmode"))
 	assert.Equal(t, "LoadBalancer", nested(t, rw.Object, "spec", "serviceTemplate", "spec", "type"))
 
+	// A migration pauses the pooler around its cutover: reconciling keeps the flag.
+	require.NoError(t, unstructured.SetNestedField(rw.Object, true, "spec", "pgbouncer", "paused"))
+	require.NoError(t, c.Update(context.Background(), rw))
+	require.NoError(t, a.Proxy())
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(rw), rw))
+	paused, found, _ := unstructured.NestedBool(rw.Object, "spec", "pgbouncer", "paused")
+	assert.True(t, found && paused, "reconciling must not resume a paused pooler")
+
+	// Pool size and client TLS from spec.proxy.config override the defaults.
+	db.Spec.Proxy.Config = "pool_mode = session\ndefault_pool_size = 90\nclient_tls_sslmode = prefer"
+	require.NoError(t, a.Proxy())
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(rw), rw))
+	assert.Equal(t, "session", nested(t, rw.Object, "spec", "pgbouncer", "poolMode"))
+	assert.Equal(t, "90", nested(t, rw.Object, "spec", "pgbouncer", "parameters", "default_pool_size"))
+	assert.Equal(t, "prefer", nested(t, rw.Object, "spec", "pgbouncer", "parameters", "client_tls_sslmode"))
+	paused, _, _ = unstructured.NestedBool(rw.Object, "spec", "pgbouncer", "paused")
+	assert.True(t, paused)
+
 	ro := newUnstructured(PoolerGVK, testNamespace, "orders-pooler-ro")
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(ro), ro), "3 instances get a read pooler")
 	pdb := &policyv1.PodDisruptionBudget{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "orders-pooler-rw"}, pdb))
 
 	// With a pooler the cluster opens no other external Service.
-	_, found, _ := unstructured.NestedSlice(a.Object, "spec", "managed", "services", "additional")
+	_, found, _ = unstructured.NestedSlice(a.Object, "spec", "managed", "services", "additional")
 	assert.False(t, found)
 
 	// Disabling the pooler deletes Poolers and PDBs.
@@ -478,15 +496,22 @@ func TestProxyExposeWithoutPooler(t *testing.T) {
 	assert.Equal(t, "Local", nested(t, service, "serviceTemplate", "spec", "externalTrafficPolicy"))
 }
 
-func TestParsePoolMode(t *testing.T) {
+func TestParseProxyConfig(t *testing.T) {
 	t.Parallel()
 	for config, want := range map[string]string{"": "session", "# comment\npool_mode = transaction": "transaction"} {
-		got, err := ParsePoolMode(config)
+		got, parameters, err := ParseProxyConfig(config)
 		require.NoError(t, err)
 		assert.Equal(t, want, got)
+		assert.Empty(t, parameters)
 	}
-	for _, config := range []string{"max_client_conn = 10", "pool_mode = statement", "garbage"} {
-		_, err := ParsePoolMode(config)
+	_, parameters, err := ParseProxyConfig("default_pool_size = 90\nmax_client_conn=200\nclient_tls_sslmode = prefer")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"default_pool_size": "90", "max_client_conn": "200", "client_tls_sslmode": "prefer"}, parameters)
+	for _, config := range []string{
+		"pool_mode = statement", "garbage", "auth_type = trust", "max_client_conn = -1",
+		"default_pool_size = many", "client_tls_sslmode = maybe",
+	} {
+		_, _, err := ParseProxyConfig(config)
 		require.Error(t, err, config)
 	}
 }
@@ -689,7 +714,7 @@ func TestValidateProxy(t *testing.T) {
 		}},
 		{name: "unsupported type", proxy: everestv1alpha1.Proxy{Type: everestv1alpha1.ProxyTypeHAProxy}, wantErr: 1},
 		{name: "unsupported config key", proxy: everestv1alpha1.Proxy{
-			Type: everestv1alpha1.ProxyTypePGBouncer, Config: "max_client_conn = 10",
+			Type: everestv1alpha1.ProxyTypePGBouncer, Config: "auth_type = trust",
 		}, wantErr: 1},
 		{name: "pooler settings without pooler", proxy: everestv1alpha1.Proxy{
 			Replicas: pointer.ToInt32(2), Config: "pool_mode = session",

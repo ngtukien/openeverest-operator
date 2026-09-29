@@ -35,7 +35,7 @@ Field upstream của `DatabaseCluster`:
 | `engine.replicas`, `storage`, `resources` | `instances`, `storage`, `resources` |
 | `engine.config` | `postgresql.parameters` (ghi đè mặc định nền tảng) |
 | `engine.userSecretsName` | Secret có `username`, `password`, tuỳ chọn `database` (mặc định `app`) |
-| `proxy.type: pgbouncer`, `replicas`, `resources`, `config: pool_mode = session\|transaction` | `Pooler` rw, thêm ro khi `replicas >= 2`, kèm PDB |
+| `proxy.type: pgbouncer`, `replicas`, `resources`, `config: pool_mode = session\|transaction` và `default_pool_size`, `min_pool_size`, `reserve_pool_size`, `max_client_conn`, `max_db_connections`, `query_wait_timeout`, `server_login_retry`, `client_tls_sslmode` | `Pooler` rw, thêm ro khi `replicas >= 2`, kèm PDB. Reconcile giữ nguyên `spec.pgbouncer.paused` của Pooler (migration pause pooler quanh cutover) |
 | `proxy.expose` | Service của pooler, hoặc `<name>-rw-external` khi không có pooler |
 | `backup.schedules[]`, `backup.pitr` | Barman Cloud Plugin + `ScheduledBackup`; một `BackupStorage` cho mỗi cụm |
 | `dataSource` | `bootstrap.recovery` qua plugin (restore chỉ khi tạo cụm mới) |
@@ -101,7 +101,7 @@ Biến môi trường của operator:
 ## Webhook từ chối
 
 `spec.paused`, `monitoring.monitoringConfigName` (PMM), `dataImport`, `engineFeatures`,
-`engine.crVersion`, `retentionCopies`, proxy khác `pgbouncer`, `proxy.config` ngoài `pool_mode`,
+`engine.crVersion`, `retentionCopies`, proxy khác `pgbouncer`, `proxy.config` ngoài các key trên,
 thiết lập pooler khi chưa bật pooler, nâng major, hạ version, đổi `cnpg.everest.io/extension`.
 
 ## Chưa làm
