@@ -981,7 +981,7 @@ func TestReplicationExpose(t *testing.T) {
 		Type: everestv1alpha1.ProxyTypePGBouncer, Replicas: pointer.ToInt32(1), Config: "pool_mode = session",
 		Expose: everestv1alpha1.Expose{Type: everestv1alpha1.ExposeTypeLoadBalancer},
 	}
-	a, _ := newTestApplier(t, db, nil, userSecret("orders_owner", ""))
+	a, c := newTestApplier(t, db, nil, userSecret("orders_owner", ""))
 	a.in, a.inErr = parseInputs(db.Annotations)
 	require.NoError(t, a.inErr)
 	require.NoError(t, a.Engine())
@@ -997,10 +997,34 @@ func TestReplicationExpose(t *testing.T) {
 	assert.Equal(t, []any{"192.168.250.1/32", "10.0.0.0/24"}, nested(t, template, "spec", "loadBalancerSourceRanges"))
 	assert.Equal(t, "LoadBalancer", nested(t, template, "spec", "type"))
 
-	role := nested(t, a.Object, "spec", "managed", "roles").([]any)[0].(map[string]any) //nolint:forcetypeassert
-	assert.Equal(t, true, role["replication"], "the subscriber logs in as the owner")
+	// The subscriber logs in as a platform role, never as the owner.
+	roles := nested(t, a.Object, "spec", "managed", "roles").([]any) //nolint:forcetypeassert
+	require.Len(t, roles, 2)
+	assert.Equal(t, false, roles[0].(map[string]any)["replication"]) //nolint:forcetypeassert
+	replicator := roles[1].(map[string]any)                          //nolint:forcetypeassert
+	assert.Equal(t, "dbaas_replicator", replicator["name"])
+	assert.Equal(t, "present", replicator["ensure"])
+	assert.Equal(t, true, replicator["replication"])
+	assert.Equal(t, false, replicator["superuser"])
+	assert.Equal(t, false, replicator["bypassrls"])
+	assert.Equal(t, []any{"orders_owner"}, replicator["inRoles"], "CONNECT on the database is granted to the owner only")
+	assert.Equal(t, map[string]any{"name": "orders-replicator"}, replicator["passwordSecret"])
 
-	// Removing the annotation takes both away.
+	secret := &corev1.Secret{}
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "orders-replicator"}, secret))
+	assert.Equal(t, "dbaas_replicator", string(secret.Data["username"]))
+	password := string(secret.Data["password"])
+	assert.Len(t, password, 43)
+	assert.Equal(t, "true", secret.Labels["cnpg.io/reload"])
+	require.Len(t, secret.OwnerReferences, 1)
+	assert.Equal(t, db.GetName(), secret.OwnerReferences[0].Name)
+
+	// A second reconcile keeps the password: rotating it would break the reverse subscription.
+	require.NoError(t, a.Engine())
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "orders-replicator"}, secret))
+	assert.Equal(t, password, string(secret.Data["password"]))
+
+	// Removing the annotation takes the Service away and drops the role.
 	delete(db.Annotations, AnnotationReplicationExpose)
 	a.in, a.inErr = parseInputs(db.Annotations)
 	require.NoError(t, a.inErr)
@@ -1008,11 +1032,30 @@ func TestReplicationExpose(t *testing.T) {
 	require.NoError(t, a.Proxy())
 	_, found, _ := unstructured.NestedSlice(a.Object, "spec", "managed", "services", "additional")
 	assert.False(t, found)
-	role = nested(t, a.Object, "spec", "managed", "roles").([]any)[0].(map[string]any) //nolint:forcetypeassert
-	assert.Equal(t, false, role["replication"])
+	roles = nested(t, a.Object, "spec", "managed", "roles").([]any) //nolint:forcetypeassert
+	require.Len(t, roles, 2)
+	assert.Equal(t, false, roles[0].(map[string]any)["replication"]) //nolint:forcetypeassert
+	assert.Equal(t, map[string]any{"name": "dbaas_replicator", "ensure": "absent"}, roles[1])
+
+	// The drop stays in the spec: CNPG reconciles roles asynchronously, so removing the entry on
+	// the next reconcile could leave the role behind.
+	require.NoError(t, a.Engine())
+	roles = nested(t, a.Object, "spec", "managed", "roles").([]any) //nolint:forcetypeassert
+	assert.Equal(t, map[string]any{"name": "dbaas_replicator", "ensure": "absent"}, roles[1])
 
 	_, err := parseInputs(annotations("replication-expose", "not-a-cidr"))
 	require.Error(t, err)
+}
+
+func TestUserSecretRejectsPlatformRoles(t *testing.T) {
+	t.Parallel()
+	for _, owner := range []string{"dbaas_replicator", "dbaas_admin_role"} {
+		db := testDB("14.24")
+		a, _ := newTestApplier(t, db, nil, userSecret(owner, ""))
+		a.in, a.inErr = parseInputs(db.Annotations)
+		require.NoError(t, a.inErr)
+		require.ErrorContains(t, a.Engine(), "platform role", owner)
+	}
 }
 
 func TestReplicaCheckpointAnnotationValidation(t *testing.T) {

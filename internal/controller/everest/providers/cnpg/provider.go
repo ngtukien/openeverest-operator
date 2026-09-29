@@ -699,7 +699,8 @@ func validateProxy(proxy everestv1alpha1.Proxy) field.ErrorList {
 //	replica-checkpoint             "fast" or "spread" for the initial pg_basebackup
 //	replication-expose             CIDRs allowed to reach the primary directly for logical
 //	                               replication (e.g. a migration source subscribing back);
-//	                               also grants REPLICATION to the owner
+//	                               the subscriber logs in as dbaas_replicator (Secret
+//	                               <name>-replicator), the owner never gets REPLICATION
 const (
 	// AnnotationPrefix starts every annotation of the CNPG provider.
 	AnnotationPrefix = "cnpg.everest.io/"
