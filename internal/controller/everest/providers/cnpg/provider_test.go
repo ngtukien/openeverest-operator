@@ -810,6 +810,14 @@ func TestParseInputsRejects(t *testing.T) {
 		"replica without user":    {"source.old.host", "h", "source.old.password-secret", "s", "replica-source", "old"},
 		"replica without auth":    {"source.old.host", "h", "source.old.user", "u", "replica-source", "old"},
 		"replica and import":      append(legacySource, "replica-source", "legacy", "schema-import-source", "legacy"),
+		"createsub and replica":   append(legacySource, "createsub-source", "legacy", "replica-source", "legacy"),
+		"createsub and import":    append(legacySource, "createsub-source", "legacy", "schema-import-source", "legacy"),
+		"createsub undefined":     {"createsub-source", "nope"},
+		"createsub without user":  {"source.t.host", "h", "source.t.dbname", "d", "source.t.password-secret", "s", "createsub-source", "t"},
+		"createsub without db":    {"source.t.host", "h", "source.t.user", "u", "source.t.password-secret", "s", "createsub-source", "t"},
+		"createsub bad database":  append(legacySource, "createsub-source", "legacy", "createsub-databases", "ok,Bad-Name"),
+		"createsub bad timeout":   append(legacySource, "createsub-source", "legacy", "createsub-recovery-timeout", "-1"),
+		"createsub options alone": {"createsub-databases", "app"},
 		"mixed replica auth": {
 			"source.a.cluster", "orders", "source.a.password-secret", "s", "source.a.ca-secret", "ca", "replica-source", "a",
 		},
@@ -1017,4 +1025,78 @@ func TestReplicaCheckpointAnnotationValidation(t *testing.T) {
 			t.Fatalf("expected invalid checkpoint annotation to fail: %v", annotations)
 		}
 	}
+}
+
+func TestSubscriberFromExternalPostgres(t *testing.T) {
+	t.Parallel()
+	db := testDB("14.24")
+	db.Annotations = annotations(
+		"source.trove.host", "192.168.250.1",
+		"source.trove.user", "postgres",
+		"source.trove.dbname", "trove",
+		"source.trove.sslmode", "prefer",
+		"source.trove.password-secret", "source-postgres-credentials",
+		"createsub-source", "trove",
+		"createsub-databases", "trove, orders",
+		"createsub-recovery-timeout", "900",
+	)
+	a, _ := newTestApplier(t, db, nil, userSecret("orders_owner", "trove"))
+	a.in, a.inErr = parseInputs(db.Annotations)
+	require.NoError(t, a.inErr)
+	require.NoError(t, a.Engine())
+	require.NoError(t, a.DataSource())
+
+	assert.Equal(t, map[string]any{"pg_createsubscriber": map[string]any{
+		"source": "source-trove",
+		"parameters": map[string]any{
+			"databases":       []any{"trove", "orders"},
+			"recoveryTimeout": int64(900),
+		},
+	}}, nested(t, a.Object, "spec", "bootstrap"))
+	entries := nested(t, a.Object, "spec", "externalClusters").([]any) //nolint:forcetypeassert
+	require.Len(t, entries, 1)
+	entry := entries[0].(map[string]any) //nolint:forcetypeassert
+	assert.Equal(t, map[string]any{
+		"host": "192.168.250.1", "port": "5432", "dbname": "trove", "user": "postgres", "sslmode": "prefer",
+	}, entry["connectionParameters"])
+	// A subscriber is a primary: it must never be a replica cluster
+	assert.NotContains(t, nested(t, a.Object, "spec").(map[string]any), "replica") //nolint:forcetypeassert
+
+	role := nested(t, a.Object, "spec", "managed", "roles").([]any)[0].(map[string]any) //nolint:forcetypeassert
+	assert.NotContains(t, role, "inRoles")
+}
+
+func TestSubscriberWithoutUserSecret(t *testing.T) {
+	t.Parallel()
+	db := testDB("14.24")
+	db.Spec.Engine.UserSecretsName = ""
+	db.Annotations = annotations(
+		"source.trove.host", "192.168.250.1",
+		"source.trove.user", "postgres",
+		"source.trove.dbname", "trove",
+		"source.trove.password-secret", "source-postgres-credentials",
+		"createsub-source", "trove",
+	)
+	a, _ := newTestApplier(t, db, nil)
+	a.in, a.inErr = parseInputs(db.Annotations)
+	require.NoError(t, a.inErr)
+	require.NoError(t, a.Engine())
+	require.NoError(t, a.DataSource())
+	// Without a user Secret no initdb may slip in: the bootstrap is still pg_createsubscriber
+	assert.Equal(t, map[string]any{"pg_createsubscriber": map[string]any{"source": "source-trove"}},
+		nested(t, a.Object, "spec", "bootstrap"))
+}
+
+func TestValidateSubscriberWithDataSource(t *testing.T) {
+	t.Parallel()
+	db := testDB("14.24")
+	db.Annotations = annotations(
+		"source.trove.host", "h", "source.trove.user", "postgres", "source.trove.dbname", "trove",
+		"source.trove.password-secret", "s", "createsub-source", "trove",
+	)
+	db.Spec.DataSource = &everestv1alpha1.DataSource{DBClusterBackupName: "backup"}
+	a, _ := newTestApplier(t, db, nil)
+	a.in, a.inErr = parseInputs(db.Annotations)
+	require.NoError(t, a.inErr)
+	require.Error(t, a.DataSource())
 }

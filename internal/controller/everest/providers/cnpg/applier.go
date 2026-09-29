@@ -412,6 +412,12 @@ func (a *applier) DataSource() error {
 		}
 		return a.replicaCluster()
 	}
+	if a.in.createSubSource != "" {
+		if ds != nil {
+			return errors.New("CloudNativePG can not bootstrap from both spec.dataSource and a createsub source")
+		}
+		return a.subscriberCluster()
+	}
 	if ds == nil {
 		return nil
 	}
@@ -666,12 +672,12 @@ func (a *applier) setBootstrapAndRoles(spec map[string]any, major uint64) (strin
 		"inRoles":         []any{adminRoleName},
 		"passwordSecret":  map[string]any{"name": secretName},
 	}
-	if a.in.replicaSource == "" {
+	if a.in.replicaSource == "" && a.in.createSubSource == "" {
 		spec["bootstrap"] = map[string]any{"initdb": initdb}
 	} else {
-		// A replica is cloned by pg_basebackup (DataSource): initdb and its postInitSQL never run,
-		// so the admin role does not exist and granting it would stall CNPG's role reconciler,
-		// and with it the pooler auth user, once the replica is promoted.
+		// A replica or a subscriber is cloned by pg_basebackup (DataSource): initdb and its
+		// postInitSQL never run, so the admin role does not exist and granting it would stall
+		// CNPG's role reconciler, and with it the pooler auth user, once the clone is a primary.
 		delete(role, "inRoles")
 	}
 	spec["managed"] = map[string]any{"roles": []any{role}}
@@ -1347,6 +1353,31 @@ func (a *applier) replicaCluster() error {
 		"enabled": a.in.replicaEnabled,
 		"source":  name,
 	}, "spec", "replica")
+}
+
+// subscriberCluster bootstraps the cluster with pg_createsubscriber: CNPG clones the source,
+// converts the clone into a primary at a point shared with new logical slots on the source, and
+// the primary keeps applying the changes of the source through subscriptions. Like a replica,
+// the clone inherits the roles and databases of the source, so no initdb runs.
+func (a *applier) subscriberCluster() error {
+	src := a.in.sources[a.in.createSubSource]
+	if err := mergeExternalCluster(a.Object, a.externalCluster(src)); err != nil {
+		return err
+	}
+	bootstrap := map[string]any{"source": externalClusterName(src.name)}
+	parameters := map[string]any{}
+	if len(a.in.createSubDatabases) != 0 {
+		parameters["databases"] = toAnySlice(a.in.createSubDatabases)
+	}
+	if a.in.createSubRecoveryTimeout != nil {
+		parameters["recoveryTimeout"] = int64(*a.in.createSubRecoveryTimeout)
+	}
+	if len(parameters) != 0 {
+		bootstrap["parameters"] = parameters
+	}
+	return unstructured.SetNestedMap(a.Object, map[string]any{
+		"pg_createsubscriber": bootstrap,
+	}, "spec", "bootstrap")
 }
 
 // reconcileDatabases creates a CNPG Database per database.<db>.owner annotation. With

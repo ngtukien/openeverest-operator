@@ -59,6 +59,9 @@ tiền tố `cnpg.everest.io/`, key dạng `<loại>.<tên>.<trường>`. Key l�
 | `replica-source` | `<src>` | `bootstrap.pg_basebackup` (database/owner/secret lấy từ user Secret) + `replica`; owner không được gán `dbaas_admin_role` vì bản clone không chạy initdb |
 | `replica-checkpoint` | `fast` / `spread` | Chỉ có cùng `replica-source`; chuyển annotation sang CNPG Cluster để manager fork chọn checkpoint của `pg_basebackup` |
 | `replica-enabled` | `true` (mặc định) / `false` = promote | `replica.enabled` |
+| `createsub-source` | `<src>` | `bootstrap.pg_createsubscriber`: CNPG fork clone vật lý nguồn rồi chuyển bản clone thành primary có subscription theo từng database (PG14 mô phỏng, PG17+ binary). Nguồn phải có `host`, `user` superuser, `password-secret`, và `dbname` hoặc `createsub-databases`. Loại trừ `replica-source`, `schema-import-source`, `dataSource`; không dùng `userSecretsName` cho initdb |
+| `createsub-databases` | database, phân tách bằng dấu phẩy | `parameters.databases`; mỗi database một publication/subscription/slot `cnpgsub_<h8>_<oid>` |
+| `createsub-recovery-timeout` | giây, `>= 0` | `parameters.recoveryTimeout` (mặc định CNPG 3600) |
 | `replication-expose` | CIDR, phân tách bằng dấu phẩy | Service LoadBalancer `<tên>-rw-replication` thẳng tới primary (bỏ qua PgBouncer, vốn không mang giao thức replication), `loadBalancerSourceRanges` = các CIDR; owner có `REPLICATION`. Dùng cho subscriber ngoài cụm, ví dụ nguồn migration đồng bộ ngược. Gỡ annotation là thu hồi cả hai |
 
 `Database`, `Publication`, `Subscription` thuộc sở hữu DatabaseCluster và mang nhãn

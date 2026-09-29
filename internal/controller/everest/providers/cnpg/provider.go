@@ -598,9 +598,11 @@ func ValidateCreate(ctx context.Context, c client.Client, db *everestv1alpha1.Da
 
 	if in, err := parseInputs(db.GetAnnotations()); err != nil {
 		allErrs = append(allErrs, field.Invalid(annotationsPath, AnnotationPrefix+"*", err.Error()))
-	} else if db.Spec.DataSource != nil && (in.replicaSource != "" || in.schemaImportSource != "") {
+	} else if db.Spec.DataSource != nil &&
+		(in.replicaSource != "" || in.schemaImportSource != "" || in.createSubSource != "") {
 		allErrs = append(allErrs, field.Forbidden(specPath.Child("dataSource"),
-			fmt.Sprintf("can not be combined with %s or %s", AnnotationReplicaSource, AnnotationSchemaImportSource)))
+			fmt.Sprintf("can not be combined with %s, %s or %s",
+				AnnotationReplicaSource, AnnotationSchemaImportSource, AnnotationCreateSubSource)))
 	}
 
 	if db.Spec.Monitoring != nil && db.Spec.Monitoring.MonitoringConfigName != "" {
@@ -721,6 +723,13 @@ const (
 	// replication protocol, so a subscriber outside the cluster needs this path.
 	AnnotationReplicationExpose = AnnotationPrefix + "replication-expose"
 
+	// AnnotationCreateSubSource names the source for pg_createsubscriber bootstrap.
+	AnnotationCreateSubSource = AnnotationPrefix + "createsub-source"
+	// AnnotationCreateSubDatabases is a comma-separated list of databases for pg_createsubscriber.
+	AnnotationCreateSubDatabases = AnnotationPrefix + "createsub-databases"
+	// AnnotationCreateSubRecoveryTimeout sets recovery timeout in seconds for pg_createsubscriber.
+	AnnotationCreateSubRecoveryTimeout = AnnotationPrefix + "createsub-recovery-timeout"
+
 	// ExtensionTimescaleDB is the AnnotationExtension value for TimescaleDB.
 	ExtensionTimescaleDB = "timescaledb"
 )
@@ -781,14 +790,17 @@ type subscription struct {
 
 // inputs is the parsed annotation contract of a DatabaseCluster.
 type inputs struct {
-	sources            map[string]*source
-	databases          []logicalDatabase
-	publications       []publication
-	subscriptions      []subscription
-	schemaImportSource string
-	replicaSource      string
-	replicaEnabled     bool
-	replicaCheckpoint  string
+	sources                  map[string]*source
+	databases                []logicalDatabase
+	publications             []publication
+	subscriptions            []subscription
+	schemaImportSource       string
+	replicaSource            string
+	replicaEnabled           bool
+	replicaCheckpoint        string
+	createSubSource          string
+	createSubDatabases       []string
+	createSubRecoveryTimeout *int
 	// replicationExpose lists the CIDRs of AnnotationReplicationExpose; empty = not exposed.
 	replicationExpose []string
 }
@@ -857,6 +869,24 @@ func (b *inputsBuilder) add(key, value string) error {
 			}
 			b.in.replicationExpose = append(b.in.replicationExpose, cidr)
 		}
+		return nil
+	case AnnotationCreateSubSource:
+		b.in.createSubSource = value
+		return nil
+	case AnnotationCreateSubDatabases:
+		for db := range strings.SplitSeq(value, ",") {
+			db = strings.TrimSpace(db)
+			if db != "" {
+				b.in.createSubDatabases = append(b.in.createSubDatabases, db)
+			}
+		}
+		return nil
+	case AnnotationCreateSubRecoveryTimeout:
+		timeout, err := strconv.Atoi(value)
+		if err != nil || timeout < 0 {
+			return fmt.Errorf("%s: must be a non-negative integer", key)
+		}
+		b.in.createSubRecoveryTimeout = &timeout
 		return nil
 	}
 
@@ -967,6 +997,35 @@ func (b *inputsBuilder) build() (inputs, error) {
 
 func (b *inputsBuilder) checkReplica() error {
 	in := b.in
+	if in.createSubSource != "" {
+		if in.replicaSource != "" {
+			return fmt.Errorf("%s and %s are exclusive bootstraps", AnnotationCreateSubSource, AnnotationReplicaSource)
+		}
+		if in.schemaImportSource != "" {
+			return fmt.Errorf("%s and %s are exclusive bootstraps", AnnotationCreateSubSource, AnnotationSchemaImportSource)
+		}
+		src := in.sources[in.createSubSource]
+		switch {
+		case src == nil:
+			return fmt.Errorf("%s: source %q is not defined", AnnotationCreateSubSource, in.createSubSource)
+		case src.host == "":
+			return fmt.Errorf("source %q: host is required for createsub", src.name)
+		case src.user == "" || src.passwordSecret == "":
+			// Publications, slots and subscriptions are created with this account: it must be a
+			// superuser that authenticates with a password
+			return fmt.Errorf("source %q: user and password-secret are required for createsub", src.name)
+		case src.dbname == "" && len(in.createSubDatabases) == 0:
+			return fmt.Errorf("source %q: dbname or %s is required", src.name, AnnotationCreateSubDatabases)
+		}
+		for _, database := range in.createSubDatabases {
+			if !postgresIdentifier.MatchString(database) {
+				return fmt.Errorf("%s: %q is not a valid PostgreSQL identifier", AnnotationCreateSubDatabases, database)
+			}
+		}
+	} else if len(in.createSubDatabases) != 0 || in.createSubRecoveryTimeout != nil {
+		return fmt.Errorf("%s and %s require %s",
+			AnnotationCreateSubDatabases, AnnotationCreateSubRecoveryTimeout, AnnotationCreateSubSource)
+	}
 	if in.replicaSource == "" {
 		if in.replicaCheckpoint != "" {
 			return fmt.Errorf("%s requires %s", AnnotationReplicaCheckpoint, AnnotationReplicaSource)
