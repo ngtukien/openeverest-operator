@@ -509,9 +509,13 @@ func TestParseProxyConfig(t *testing.T) {
 	_, parameters, err := ParseProxyConfig("default_pool_size = 90\nmax_client_conn=200\nclient_tls_sslmode = prefer")
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"default_pool_size": "90", "max_client_conn": "200", "client_tls_sslmode": "prefer"}, parameters)
+	mode, parameters, err := ParseProxyConfig("pool_mode = transaction\nmax_prepared_statements = 200")
+	require.NoError(t, err)
+	assert.Equal(t, "transaction", mode)
+	assert.Equal(t, map[string]string{"max_prepared_statements": "200"}, parameters)
 	for _, config := range []string{
 		"pool_mode = statement", "garbage", "auth_type = trust", "max_client_conn = -1",
-		"default_pool_size = many", "client_tls_sslmode = maybe",
+		"default_pool_size = many", "client_tls_sslmode = maybe", "max_prepared_statements = -1",
 	} {
 		_, _, err := ParseProxyConfig(config)
 		require.Error(t, err, config)

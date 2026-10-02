@@ -1204,15 +1204,18 @@ func poolerEnabled(db *everestv1alpha1.DatabaseCluster) bool {
 // proxyParameters are the PgBouncer settings spec.proxy.config may carry besides pool_mode,
 // with the check of their value. They size the pool and its TLS: a migration that moves clients
 // from a direct connection to the pooler sets them to what the source accepted.
+// max_prepared_statements lets transaction pooling keep the protocol-level prepared statements of
+// the drivers (PgBouncer 1.21+); 0 turns that off.
 var proxyParameters = map[string]func(string) error{
-	"default_pool_size":  nonNegativeInt,
-	"min_pool_size":      nonNegativeInt,
-	"reserve_pool_size":  nonNegativeInt,
-	"max_client_conn":    nonNegativeInt,
-	"max_db_connections": nonNegativeInt,
-	"query_wait_timeout": nonNegativeInt,
-	"server_login_retry": nonNegativeInt,
-	"client_tls_sslmode": oneOf("disable", "allow", "prefer", "require", "verify-ca", "verify-full"),
+	"default_pool_size":       nonNegativeInt,
+	"min_pool_size":           nonNegativeInt,
+	"reserve_pool_size":       nonNegativeInt,
+	"max_client_conn":         nonNegativeInt,
+	"max_db_connections":      nonNegativeInt,
+	"query_wait_timeout":      nonNegativeInt,
+	"server_login_retry":      nonNegativeInt,
+	"max_prepared_statements": nonNegativeInt,
+	"client_tls_sslmode":      oneOf("disable", "allow", "prefer", "require", "verify-ca", "verify-full"),
 }
 
 func nonNegativeInt(value string) error {
