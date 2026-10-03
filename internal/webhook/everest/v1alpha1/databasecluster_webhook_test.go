@@ -545,7 +545,30 @@ func TestDatabaseClusterValidator_ValidateUpdate(t *testing.T) {
 		wantErr error
 	}
 
+	withdrawn := func(annotations map[string]string) *everestv1alpha1.DatabaseCluster {
+		return &everestv1alpha1.DatabaseCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        dbcTestDbName,
+				Namespace:   dbcTestDbNamespace,
+				Annotations: annotations,
+			},
+			Spec: everestv1alpha1.DatabaseClusterSpec{
+				Engine: everestv1alpha1.Engine{
+					Type:    everestv1alpha1.DatabaseEnginePostgresql,
+					Version: "12.0", // not in the catalog any more
+				},
+			},
+		}
+	}
+
 	testCases := []testCase{
+		// valid: the version left the catalog, the cluster keeps running it and can still be updated
+		// (deleted: its finalizers are removed by an update)
+		{
+			name:  "Update a cluster whose version was withdrawn from the catalog",
+			oldDb: withdrawn(nil),
+			newDb: withdrawn(map[string]string{"note": "x"}),
+		},
 		// invalid cases
 		// db engine type change
 		{

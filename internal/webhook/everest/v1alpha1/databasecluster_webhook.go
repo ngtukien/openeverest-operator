@@ -171,9 +171,13 @@ func (v *DatabaseClusterValidator) ValidateUpdate(ctx context.Context, oldDb, ne
 		allErrs = append(allErrs, cnpg.ValidateUpdate(ctx, v.Client, oldDb, newDb)...)
 	}
 
-	// Validate the engine version
-	if errs := v.validateEngineVersion(ctx, newDb); errs != nil {
-		allErrs = append(allErrs, errs...)
+	// Validate the engine version. A version withdrawn from the catalog keeps running clusters
+	// running: an update that does not change it (an annotation, the finalizers removed on
+	// deletion) must not be refused because of it.
+	if oldDb.Spec.Engine.Version != newDb.Spec.Engine.Version {
+		if errs := v.validateEngineVersion(ctx, newDb); errs != nil {
+			allErrs = append(allErrs, errs...)
+		}
 	}
 
 	// TODO: move remaining validations from Everest API
