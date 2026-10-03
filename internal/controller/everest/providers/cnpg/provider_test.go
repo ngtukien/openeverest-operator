@@ -275,9 +275,29 @@ func TestValidateVersionChange(t *testing.T) {
 	for version, wantErr := range map[string]bool{"16.4": false, "16.6": false, "16.2": true, "17.1": true} {
 		desired, err := semver.NewVersion(version)
 		require.NoError(t, err)
-		err = validateVersionChange(testImage16, desired)
+		err = validateVersionChange(testImage16, desired, false)
 		assert.Equal(t, wantErr, err != nil, version)
 	}
+	// Allowed: a newer major only, never a downgrade or an older major
+	for version, wantErr := range map[string]bool{"17.1": false, "16.6": false, "16.2": true, "15.8": true} {
+		desired, err := semver.NewVersion(version)
+		require.NoError(t, err)
+		err = validateVersionChange(testImage16, desired, true)
+		assert.Equal(t, wantErr, err != nil, "allowMajor "+version)
+	}
+}
+
+func TestEngineMajorUpgradeAllowed(t *testing.T) {
+	t.Parallel()
+	db := testDB("16.4")
+	running := map[string]any{"imageName": testImage14}
+	a, _ := newTestApplier(t, db, running, userSecret("orders_owner", ""))
+	require.ErrorContains(t, a.Engine(), "major upgrades", "not allowed without the annotation")
+
+	db.Annotations = map[string]string{AnnotationMajorUpgrade: MajorUpgradeAllow}
+	b, _ := newTestApplier(t, db, running, userSecret("orders_owner", ""))
+	require.NoError(t, b.Engine())
+	assert.Equal(t, testImage16, nested(t, b.Object, "spec", "imageName"), "the image of the new major is written")
 }
 
 func newTestStorage() *everestv1alpha1.BackupStorage {
@@ -747,6 +767,17 @@ func TestValidateUpdate(t *testing.T) {
 	ctx := context.Background()
 	assert.Empty(t, ValidateUpdate(ctx, c, db("16.4", ""), db("16.6", "")), "minor upgrade")
 	assert.Len(t, ValidateUpdate(ctx, c, db("16.4", ""), db("17.1", "")), 1, "major upgrade")
+	allow := func(d *everestv1alpha1.DatabaseCluster) *everestv1alpha1.DatabaseCluster {
+		if d.Annotations == nil {
+			d.Annotations = map[string]string{}
+		}
+		d.Annotations[AnnotationMajorUpgrade] = MajorUpgradeAllow
+		return d
+	}
+	assert.Empty(t, ValidateUpdate(ctx, c, db("16.4", ""), allow(db("17.1", ""))), "major upgrade allowed")
+	assert.Len(t, ValidateUpdate(ctx, c, allow(db("17.1", "")), allow(db("16.4", ""))), 1, "major downgrade even when allowed")
+	assert.Len(t, ValidateUpdate(ctx, c, db("16.4", ExtensionTimescaleDB), allow(db("17.1", ExtensionTimescaleDB))), 1,
+		"TimescaleDB is not upgraded in place")
 	assert.Len(t, ValidateUpdate(ctx, c, db("16.4", ""), db("16.2", "")), 1, "downgrade")
 	assert.Len(t, ValidateUpdate(ctx, c, db("16.4", ""), db("16.4", ExtensionTimescaleDB)), 1, "flavor switch")
 

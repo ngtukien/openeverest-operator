@@ -62,6 +62,7 @@ tiền tố `cnpg.everest.io/`, key dạng `<loại>.<tên>.<trường>`. Key l�
 | `createsub-source` | `<src>` | `bootstrap.pg_createsubscriber`: CNPG fork clone vật lý nguồn rồi chuyển bản clone thành primary có subscription theo từng database (PG14 mô phỏng, PG17+ binary). Nguồn phải có `host`, `user` superuser, `password-secret`, và `dbname` hoặc `createsub-databases`. Loại trừ `replica-source`, `schema-import-source`, `dataSource`; không dùng `userSecretsName` cho initdb |
 | `createsub-databases` | database, phân tách bằng dấu phẩy | `parameters.databases`; mỗi database một publication/subscription/slot `cnpgsub_<h8>_<oid>` |
 | `createsub-recovery-timeout` | giây, `>= 0` | `parameters.recoveryTimeout` (mặc định CNPG 3600) |
+| `major-upgrade` | `allow` | Cho `spec.engine.version` lên major mới hơn: operator ghi image của major mới vào `spec.imageName`, CNPG chạy pg_upgrade offline tại chỗ. Chỉ flavor thường (không TimescaleDB); hạ version vẫn bị từ chối |
 | `replication-expose` | CIDR, phân tách bằng dấu phẩy | Service LoadBalancer `<tên>-rw-replication` thẳng tới primary (bỏ qua PgBouncer, vốn không mang giao thức replication), `loadBalancerSourceRanges` = các CIDR; subscriber đăng nhập bằng role nền tảng `dbaas_replicator` (`REPLICATION`, thành viên của owner để có `CONNECT`; password do operator sinh trong Secret `<tên>-replicator`, không xoay vòng). Owner không bao giờ có `REPLICATION`. Dùng cho subscriber ngoài cụm, ví dụ nguồn migration đồng bộ ngược. Operator cũng tạo NetworkPolicy `<tên>-replication` mở 5432 của các instance cho đúng các CIDR này (namespace default-deny vẫn nhận được subscriber). Gỡ annotation là gỡ Service, NetworkPolicy và drop role (`ensure: absent`, giữ lại trong spec) |
 
 `Database`, `Publication`, `Subscription` thuộc sở hữu DatabaseCluster và mang nhãn
@@ -105,7 +106,8 @@ Biến môi trường của operator:
 
 `spec.paused`, `monitoring.monitoringConfigName` (PMM), `dataImport`, `engineFeatures`,
 `engine.crVersion`, `retentionCopies`, proxy khác `pgbouncer`, `proxy.config` ngoài các key trên,
-thiết lập pooler khi chưa bật pooler, nâng major, hạ version, đổi `cnpg.everest.io/extension`.
+thiết lập pooler khi chưa bật pooler, nâng major (trừ khi có `cnpg.everest.io/major-upgrade: allow`),
+hạ version, đổi `cnpg.everest.io/extension`.
 
 ## Chưa làm
 

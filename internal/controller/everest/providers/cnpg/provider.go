@@ -629,8 +629,8 @@ func ValidateCreate(ctx context.Context, c client.Client, db *everestv1alpha1.Da
 	return allErrs
 }
 
-// ValidateUpdate additionally rejects changes CNPG can not roll out: major upgrades, downgrades
-// and a flavor switch.
+// ValidateUpdate additionally rejects changes CNPG can not roll out: downgrades, a flavor switch
+// and major upgrades, unless AnnotationMajorUpgrade allows a newer major on the plain flavor.
 func ValidateUpdate(ctx context.Context, c client.Client, oldDb, newDb *everestv1alpha1.DatabaseCluster) field.ErrorList {
 	allErrs := ValidateCreate(ctx, c, newDb)
 	if oldDb.GetAnnotations()[AnnotationExtension] != newDb.GetAnnotations()[AnnotationExtension] {
@@ -642,14 +642,23 @@ func ValidateUpdate(ctx context.Context, c client.Client, oldDb, newDb *everestv
 		return allErrs
 	}
 	switch {
+	case newVersion.Major() > oldVersion.Major() && majorUpgradeAllowed(newDb):
 	case oldVersion.Major() != newVersion.Major():
 		allErrs = append(allErrs, field.Forbidden(engineVersionPath, fmt.Sprintf(
-			"CloudNativePG does not support major upgrades (current=%s, requested=%s)", oldVersion, newVersion)))
+			"CloudNativePG does not support major upgrades (current=%s, requested=%s); "+
+				"set %s: %s to upgrade in place", oldVersion, newVersion, AnnotationMajorUpgrade, MajorUpgradeAllow)))
 	case newVersion.LessThan(oldVersion):
 		allErrs = append(allErrs, field.Forbidden(engineVersionPath, fmt.Sprintf(
 			"CloudNativePG does not support downgrades (current=%s, requested=%s)", oldVersion, newVersion)))
 	}
 	return allErrs
+}
+
+// majorUpgradeAllowed reports whether a newer major may replace the running one in place. The
+// TimescaleDB flavor is excluded: its catalog image of the new major is not checked for the extension.
+func majorUpgradeAllowed(db *everestv1alpha1.DatabaseCluster) bool {
+	annotations := db.GetAnnotations()
+	return annotations[AnnotationMajorUpgrade] == MajorUpgradeAllow && annotations[AnnotationExtension] == ""
 }
 
 // validateProxy accepts the pgbouncer pooler only, and rejects pooler settings that would be
@@ -685,6 +694,8 @@ func validateProxy(proxy everestv1alpha1.Proxy) field.ErrorList {
 // one scalar value per annotation, under the AnnotationPrefix:
 //
 //	extension                      "timescaledb"
+//	major-upgrade                  "allow": a newer major in spec.engine.version is accepted and
+//	                               CNPG upgrades the data in place (pg_upgrade); plain flavor only
 //	server-alt-dns-names           comma-separated DNS names for the server certificate
 //	source.<src>.<field>           an external PostgreSQL; fields: host, port, dbname, user,
 //	                               sslmode, password-secret ("secret" or "secret/key"),
@@ -731,6 +742,12 @@ const (
 	AnnotationCreateSubDatabases = AnnotationPrefix + "createsub-databases"
 	// AnnotationCreateSubRecoveryTimeout sets recovery timeout in seconds for pg_createsubscriber.
 	AnnotationCreateSubRecoveryTimeout = AnnotationPrefix + "createsub-recovery-timeout"
+
+	// AnnotationMajorUpgrade set to MajorUpgradeAllow lets spec.engine.version move to a newer
+	// major: Everest writes the new image and CNPG runs its offline in-place upgrade (pg_upgrade).
+	AnnotationMajorUpgrade = AnnotationPrefix + "major-upgrade"
+	// MajorUpgradeAllow is the only accepted value of AnnotationMajorUpgrade.
+	MajorUpgradeAllow = "allow"
 
 	// ExtensionTimescaleDB is the AnnotationExtension value for TimescaleDB.
 	ExtensionTimescaleDB = "timescaledb"
@@ -843,6 +860,11 @@ type inputsBuilder struct {
 func (b *inputsBuilder) add(key, value string) error {
 	switch key {
 	case AnnotationExtension, AnnotationServerAltDNSNames:
+		return nil
+	case AnnotationMajorUpgrade:
+		if value != MajorUpgradeAllow {
+			return fmt.Errorf("%s: must be %q", key, MajorUpgradeAllow)
+		}
 		return nil
 	case AnnotationSchemaImportSource:
 		b.in.schemaImportSource = value

@@ -642,7 +642,7 @@ func (a *applier) setImage(spec map[string]any, desired *semver.Version) error {
 	}
 
 	currentImage, _, _ := unstructured.NestedString(a.Object, "spec", "imageName")
-	if err := validateVersionChange(currentImage, desired); err != nil {
+	if err := validateVersionChange(currentImage, desired, majorUpgradeAllowed(a.DB)); err != nil {
 		return err
 	}
 	switch component := a.DBEngine.Status.AvailableVersions.Engine[a.DB.Spec.Engine.Version]; {
@@ -1115,9 +1115,9 @@ func (a *applier) currentStorageSize() (resource.Quantity, error) {
 	return current, nil
 }
 
-// validateVersionChange rejects major upgrades and downgrades: CNPG rolling updates only
-// support minor versions.
-func validateVersionChange(currentImage string, desired *semver.Version) error {
+// validateVersionChange rejects downgrades and, unless allowMajor, major upgrades: CNPG rolling
+// updates only support minor versions; a newer major image makes CNPG run pg_upgrade instead.
+func validateVersionChange(currentImage string, desired *semver.Version, allowMajor bool) error {
 	if currentImage == "" {
 		return nil
 	}
@@ -1128,6 +1128,9 @@ func validateVersionChange(currentImage string, desired *semver.Version) error {
 	current, err := semver.NewVersion(currentVersion)
 	if err != nil {
 		return err
+	}
+	if desired.Major() > current.Major() && allowMajor {
+		return nil
 	}
 	if desired.Major() != current.Major() {
 		return fmt.Errorf("CloudNativePG does not support PostgreSQL major upgrades: current=%s desired=%s",
