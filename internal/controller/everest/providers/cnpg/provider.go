@@ -38,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -597,9 +598,10 @@ func ValidateCreate(ctx context.Context, c client.Client, db *everestv1alpha1.Da
 
 	if in, err := parseInputs(db.GetAnnotations()); err != nil {
 		allErrs = append(allErrs, field.Invalid(annotationsPath, AnnotationPrefix+"*", err.Error()))
-	} else if db.Spec.DataSource != nil && (in.replicaSource != "" || in.schemaImportSource != "") {
+	} else if db.Spec.DataSource != nil && (in.replicaSource != "" || in.schemaImportSource != "" || in.volumeSnapshotSource != "") {
 		allErrs = append(allErrs, field.Forbidden(specPath.Child("dataSource"),
-			fmt.Sprintf("can not be combined with %s or %s", AnnotationReplicaSource, AnnotationSchemaImportSource)))
+			fmt.Sprintf("can not be combined with %s, %s or %s",
+				AnnotationReplicaSource, AnnotationSchemaImportSource, AnnotationVolumeSnapshotSource)))
 	}
 
 	if db.Spec.Monitoring != nil && db.Spec.Monitoring.MonitoringConfigName != "" {
@@ -693,6 +695,8 @@ func validateProxy(proxy everestv1alpha1.Proxy) field.ErrorList {
 //	                               reclaim-policy ("retain" or "delete")
 //	schema-import-source           <src> to import the schema of the application database from
 //	replica-source                 <src> to replicate from; replica-enabled "false" promotes
+//	volume-snapshot-source         <VolumeSnapshot> of a PGDATA volume to start from (e.g. a
+//	                               storage clone of a migration source of the same major)
 const (
 	// AnnotationPrefix starts every annotation of the CNPG provider.
 	AnnotationPrefix = "cnpg.everest.io/"
@@ -707,6 +711,9 @@ const (
 	AnnotationReplicaSource = AnnotationPrefix + "replica-source"
 	// AnnotationReplicaEnabled keeps the cluster a replica ("true", default); "false" promotes it.
 	AnnotationReplicaEnabled = AnnotationPrefix + "replica-enabled"
+	// AnnotationVolumeSnapshotSource names a VolumeSnapshot, in the namespace of the cluster, of
+	// a PGDATA volume (PGDATA in the pgdata directory) the cluster starts from.
+	AnnotationVolumeSnapshotSource = AnnotationPrefix + "volume-snapshot-source"
 
 	// ExtensionTimescaleDB is the AnnotationExtension value for TimescaleDB.
 	ExtensionTimescaleDB = "timescaledb"
@@ -775,6 +782,8 @@ type inputs struct {
 	schemaImportSource string
 	replicaSource      string
 	replicaEnabled     bool
+	// volumeSnapshotSource is the VolumeSnapshot of AnnotationVolumeSnapshotSource.
+	volumeSnapshotSource string
 }
 
 // parseInputs reads the annotations of the CNPG provider. Unknown keys are rejected, so a typo
@@ -819,6 +828,12 @@ func (b *inputsBuilder) add(key, value string) error {
 		return nil
 	case AnnotationReplicaSource:
 		b.in.replicaSource = value
+		return nil
+	case AnnotationVolumeSnapshotSource:
+		if errs := validation.IsDNS1123Subdomain(value); len(errs) != 0 {
+			return fmt.Errorf("%s: %s", key, strings.Join(errs, "; "))
+		}
+		b.in.volumeSnapshotSource = value
 		return nil
 	case AnnotationReplicaEnabled:
 		enabled, err := strconv.ParseBool(value)
@@ -936,6 +951,9 @@ func (b *inputsBuilder) build() (inputs, error) {
 
 func (b *inputsBuilder) checkReplica() error {
 	in := b.in
+	if in.volumeSnapshotSource != "" && (in.replicaSource != "" || in.schemaImportSource != "") {
+		return fmt.Errorf("%s excludes %s and %s", AnnotationVolumeSnapshotSource, AnnotationReplicaSource, AnnotationSchemaImportSource)
+	}
 	if in.replicaSource == "" {
 		if b.replicaEnabledSet {
 			return fmt.Errorf("%s requires %s", AnnotationReplicaEnabled, AnnotationReplicaSource)

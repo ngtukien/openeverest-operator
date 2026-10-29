@@ -768,6 +768,8 @@ func TestParseInputsRejects(t *testing.T) {
 		"replica without user":    {"source.old.host", "h", "source.old.password-secret", "s", "replica-source", "old"},
 		"replica without auth":    {"source.old.host", "h", "source.old.user", "u", "replica-source", "old"},
 		"replica and import":      append(legacySource, "replica-source", "legacy", "schema-import-source", "legacy"),
+		"snapshot and import":     append(legacySource, "volume-snapshot-source", "seed", "schema-import-source", "legacy"),
+		"invalid snapshot name":   {"volume-snapshot-source", "Seed_1"},
 		"mixed replica auth": {
 			"source.a.cluster", "orders", "source.a.password-secret", "s", "source.a.ca-secret", "ca", "replica-source", "a",
 		},
@@ -858,6 +860,29 @@ func TestReplicaCluster(t *testing.T) {
 
 	db.Spec.DataSource = &everestv1alpha1.DataSource{DBClusterBackupName: "nightly"}
 	require.Error(t, a.DataSource(), "a replica can not also restore")
+}
+
+func TestVolumeSnapshotCluster(t *testing.T) {
+	t.Parallel()
+	db := testDB("16.4")
+	db.Annotations = annotations("volume-snapshot-source", "trove-seed")
+	a, _ := newTestApplier(t, db, nil, userSecret("app", "trove"))
+	a.in, a.inErr = parseInputs(db.Annotations)
+	require.NoError(t, a.inErr)
+	require.NoError(t, a.Engine())
+	require.NoError(t, a.DataSource())
+
+	recovery := nested(t, a.Object, "spec", "bootstrap", "recovery").(map[string]any) //nolint:forcetypeassert
+	assert.Equal(t, map[string]any{"storage": map[string]any{
+		"name": "trove-seed", "kind": "VolumeSnapshot", "apiGroup": "snapshot.storage.k8s.io",
+	}}, recovery["volumeSnapshots"])
+	assert.Equal(t, "app", recovery["owner"])
+	assert.Equal(t, "trove", recovery["database"])
+	assert.NotContains(t, recovery, "source", "no WAL archive: PostgreSQL replays the pg_wal of the snapshot")
+	assert.Len(t, nested(t, a.Object, "spec", "bootstrap"), 1, "the initdb stanza is replaced")
+
+	db.Spec.DataSource = &everestv1alpha1.DataSource{DBClusterBackupName: "nightly"}
+	require.Error(t, a.DataSource(), "a volume snapshot can not also restore")
 }
 
 func TestDataSourceKeepsSubscriptionSources(t *testing.T) {
