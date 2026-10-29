@@ -382,6 +382,12 @@ func (a *applier) DataSource() error {
 		}
 		return a.replicaCluster()
 	}
+	if a.in.volumeSnapshotSource != "" {
+		if ds != nil {
+			return errors.New("CloudNativePG can not bootstrap from both spec.dataSource and a volume snapshot")
+		}
+		return a.volumeSnapshotCluster()
+	}
 	if ds == nil {
 		return nil
 	}
@@ -428,7 +434,18 @@ func (a *applier) DataSource() error {
 	if len(target) != 0 {
 		recovery["recoveryTarget"] = target
 	}
-	// Keep the owner and database of the user Secret, as a fresh initdb would.
+	if err := a.setRecovery(recovery); err != nil {
+		return err
+	}
+	return mergeExternalCluster(a.Object, map[string]any{
+		"name":   source.name,
+		"plugin": recoveryPluginConfiguration(source.objectStore, source.serverName),
+	})
+}
+
+// setRecovery sets the recovery bootstrap. It keeps the owner and database of the user Secret,
+// as a fresh initdb would.
+func (a *applier) setRecovery(recovery map[string]any) error {
 	if secretName := a.DB.Spec.Engine.UserSecretsName; secretName != "" {
 		owner, database, err := a.readUserSecret(secretName)
 		if err != nil {
@@ -438,13 +455,18 @@ func (a *applier) DataSource() error {
 		recovery["database"] = database
 		recovery["secret"] = map[string]any{"name": secretName}
 	}
-	if err := unstructured.SetNestedMap(a.Object, map[string]any{"recovery": recovery}, "spec", "bootstrap"); err != nil {
-		return err
-	}
-	return mergeExternalCluster(a.Object, map[string]any{
-		"name":   source.name,
-		"plugin": recoveryPluginConfiguration(source.objectStore, source.serverName),
-	})
+	return unstructured.SetNestedMap(a.Object, map[string]any{"recovery": recovery}, "spec", "bootstrap")
+}
+
+// volumeSnapshotCluster bootstraps from the VolumeSnapshot of AnnotationVolumeSnapshotSource: a
+// crash-consistent copy of the PGDATA of a PostgreSQL of the same major. Without a recovery source
+// CNPG starts it as it is: PostgreSQL replays the pg_wal of the copy and comes up as the primary.
+func (a *applier) volumeSnapshotCluster() error {
+	return a.setRecovery(map[string]any{"volumeSnapshots": map[string]any{"storage": map[string]any{
+		"name":     a.in.volumeSnapshotSource,
+		"kind":     "VolumeSnapshot",
+		"apiGroup": "snapshot.storage.k8s.io",
+	}}})
 }
 
 type recoverySource struct {
