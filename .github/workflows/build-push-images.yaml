@@ -4,7 +4,11 @@ on:
   push:
     branches:
       - main
-  # Chạy tay: gh workflow run build-push-images.yaml -R ngtukien/openeverest-operator
+    # Tag bản phát hành của fork (release/<version>-dbaas): image mang tag git, ví dụ v1.17.0-dbaas.2
+    tags:
+      - 'v*-dbaas.*'
+  # Chạy tay cho tag/nhánh có sẵn:
+  #   gh workflow run build-push-images.yaml -R ngtukien/openeverest-operator --ref v1.17.0-dbaas.1
   workflow_dispatch:
 
 permissions:
@@ -54,6 +58,7 @@ jobs:
           # 0.0.0 bị ghi đè mỗi lần build; tag theo commit để deploy trỏ đúng một bản dựng.
           tags: |
             type=raw,value=0.0.0,enable=${{ contains(github.ref_name, 'main') }}
+            type=ref,event=tag
             type=sha,prefix=,format=short
 
       - name: Docker bundle meta
@@ -62,8 +67,12 @@ jobs:
         with:
           images: |
             ${{ env.IMAGE_PREFIX }}/${{ env.EVEREST_OPERATOR_BUNDLE_DEV_IMAGE_NAME }}
+          # Luôn có ít nhất tag sha: chạy từ tag git mà chỉ có 0.0.0 (chỉ bật trên main) thì buildx lỗi
+          # "tag is needed when pushing to registry".
           tags: |
             type=raw,value=0.0.0,enable=${{ contains(github.ref_name, 'main') }}
+            type=ref,event=tag
+            type=sha,prefix=,format=short
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
@@ -73,6 +82,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Push operator image
+        id: push_operator
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
@@ -86,3 +96,14 @@ jobs:
           push: true
           tags: ${{ steps.bundle_meta.outputs.tags }}
           file: bundle.Dockerfile
+
+      # Digest để ghim trong dbaas (infra/ansible/group_vars/all.yml → images.everest_operator.digest)
+      - name: Digest
+        run: |
+          {
+            echo "### Image"
+            echo '```'
+            echo "${{ env.IMAGE_PREFIX }}/${{ env.EVEREST_OPERATOR_DEV_IMAGE_NAME }}@${{ steps.push_operator.outputs.digest }}"
+            echo "tags: ${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
