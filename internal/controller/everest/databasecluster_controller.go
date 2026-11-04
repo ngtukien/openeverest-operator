@@ -177,7 +177,12 @@ func (r *DatabaseClusterReconciler) reconcileDB(
 
 	// Update the status of the DatabaseCluster object after the reconciliation.
 	defer func() {
-		rr, rerr = r.reconcileDBStatus(ctx, db, p)
+		// Status is always refreshed, but an error from the reconcile above must not be replaced by
+		// the status result: otherwise a failed CreateOrUpdate is neither logged nor retried.
+		statusRes, statusErr := r.reconcileDBStatus(ctx, db, p)
+		if rerr == nil {
+			rr, rerr = statusRes, statusErr
+		}
 	}()
 
 	// Run pre-reconcile hook.

@@ -17,8 +17,10 @@ package cnpg
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"regexp"
 	"strconv"
@@ -29,6 +31,7 @@ import (
 	"github.com/Masterminds/semver/v3"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -55,7 +58,10 @@ const (
 
 const (
 	defaultAppDatabase = "app"
-	superuserName      = "postgres"
+	// defaultAppOwner is the owner written into the default user Secret (everest-secrets-<cluster>).
+	defaultAppOwner       = "app"
+	defaultPasswordLength = 24
+	superuserName         = "postgres"
 	// Role that groups the privileges delegated to the customer user.
 	adminRoleName = "dbaas_admin_role"
 	// Label that makes CNPG watch a Secret it does not own, so password changes reach
@@ -620,6 +626,9 @@ func (a *applier) setStorage(spec map[string]any) error {
 // CNPG managed role, so a password change in the user Secret reaches PostgreSQL.
 func (a *applier) setBootstrapAndRoles(spec map[string]any, major uint64) (string, error) {
 	secretName := a.DB.Spec.Engine.UserSecretsName
+	if err := a.ensureDefaultUserSecret(secretName); err != nil {
+		return "", err
+	}
 	owner, database, err := a.readUserSecret(secretName)
 	if err != nil {
 		return "", err
@@ -661,6 +670,53 @@ func (a *applier) setBootstrapAndRoles(spec map[string]any, major uint64) (strin
 		}},
 	}
 	return owner, nil
+}
+
+// ensureDefaultUserSecret creates the Secret that the controller names by default
+// (everest-secrets-<cluster>) when the request referenced none, as the Percona operators do:
+// owner "app", database "app", random password. A Secret the user referenced is never created.
+func (a *applier) ensureDefaultUserSecret(secretName string) error {
+	if secretName != consts.EverestSecretsPrefix+a.DB.GetName() {
+		return nil
+	}
+	key := types.NamespacedName{Namespace: a.DB.GetNamespace(), Name: secretName}
+	if err := a.C.Get(a.ctx, key, &corev1.Secret{}); !k8serrors.IsNotFound(err) {
+		return err
+	}
+	password, err := randomPassword(defaultPasswordLength)
+	if err != nil {
+		return err
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+		Type:       corev1.SecretTypeBasicAuth,
+		StringData: map[string]string{
+			corev1.BasicAuthUsernameKey: defaultAppOwner,
+			corev1.BasicAuthPasswordKey: password,
+			userSecretDatabaseKey:       defaultAppDatabase,
+		},
+	}
+	if err := controllerutil.SetControllerReference(a.DB, secret, a.C.Scheme()); err != nil {
+		return err
+	}
+	if err := a.C.Create(a.ctx, secret); err != nil && !k8serrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create default user secret %q: %w", secretName, err)
+	}
+	return nil
+}
+
+// randomPassword returns n characters from [A-Za-z0-9].
+func randomPassword(n int) (string, error) {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	buf := make([]byte, n)
+	for i := range buf {
+		idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			return "", err
+		}
+		buf[i] = alphabet[idx.Int64()]
+	}
+	return string(buf), nil
 }
 
 // readUserSecret reads the application owner and database from the user Secret and labels the
